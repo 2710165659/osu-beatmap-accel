@@ -5,11 +5,8 @@ using osu.Framework.Bindables;
 using osu.Framework.Development;
 using osu.Game.Audio;
 using osu.Game.Beatmaps;
-using osu.Game.Database;
-using osu.Game.Online.API;
 using osu.Game.Online.API.Requests.Responses;
-using osu.Game.Overlays;
-using osu.Game.Overlays.Notifications;
+using osu.Game.Rulesets.BeatmapAccel.Configuration;
 using osu.Game.Rulesets.BeatmapAccel.Features.Download.UI;
 using osu.Game.Rulesets.BeatmapAccel.Features.Injection;
 using osu.Game.Rulesets.BeatmapAccel.Features.Injection.Utils;
@@ -20,6 +17,7 @@ public partial class PreviewTrackHandler : AbstractHandler
 {
     private readonly Bindable<PreviewTrackManager.TrackManagerPreviewTrack?> previewTrack = new();
     private readonly object injectLock = new();
+    private readonly IBindable<bool>? showPreviewOverlay = BeatmapAccelRulesetConfigManager.Instance?.GetBindable<bool>(BeatmapAccelSetting.ShowPreviewDownloadOverlay);
 
     private FieldInfo? previewTrackFieldInfo;
     private int? currentBeatmapSetId;
@@ -31,43 +29,17 @@ public partial class PreviewTrackHandler : AbstractHandler
     [Resolved]
     private OsuGame game { get; set; } = null!;
 
-    [Resolved(canBeNull: true)]
-    private BeatmapManager? beatmapManager { get; set; }
-
-    [Resolved(canBeNull: true)]
-    private IAPIProvider? apiProvider { get; set; }
-
-    public static BeatmapAccelBeatmapModelDownloader? Downloader { get; private set; }
-
     [BackgroundDependencyLoader]
-    private void load(INotificationOverlay notificationOverlay)
+    private void load()
     {
         previewTrack.BindValueChanged(onPreviewTrackChanged);
+        showPreviewOverlay?.BindValueChanged(_ => Schedule(refreshOverlay), true);
 
         if (!tryLocatePreviewTrackField())
         {
-            notificationOverlay.Post(new SimpleNotification
-            {
-                Text = "BeatmapAccel: unable to locate preview track manager."
-            });
+            BeatmapAccelLogging.Log("BeatmapAccel: unable to locate preview track manager.");
             return;
         }
-
-        if (beatmapManager == null || apiProvider == null)
-        {
-            notificationOverlay.Post(new SimpleNotification
-            {
-                Text = "BeatmapAccel: required beatmap download dependencies are missing."
-            });
-            return;
-        }
-
-        setupDownloader(beatmapManager, apiProvider);
-        if (Downloader != null)
-            Downloader.PostNotification = notificationOverlay.Post;
-
-        CloudflareSpeedTestManager.ScheduleToMainThread ??= action => Schedule(action);
-        CloudflareSpeedTestManager.BeginStartupSpeedTest();
     }
 
     protected override void Update()
@@ -122,6 +94,12 @@ public partial class PreviewTrackHandler : AbstractHandler
         if (apiSet == null)
             return;
 
+        if (showPreviewOverlay?.Value == false)
+        {
+            currentBeatmapSetId = apiSet.OnlineID;
+            return;
+        }
+
         if (currentBeatmapSetId == apiSet.OnlineID)
             return;
 
@@ -130,6 +108,16 @@ public partial class PreviewTrackHandler : AbstractHandler
         game.Add(currentOverlay);
     }
 
-    private static void setupDownloader(IModelImporter<BeatmapSetInfo> beatmapImporter, IAPIProvider api)
-        => Downloader = new BeatmapAccelBeatmapModelDownloader(beatmapImporter, api);
+    private void refreshOverlay()
+    {
+        if (showPreviewOverlay?.Value == false)
+        {
+            currentOverlay?.Hide();
+            currentOverlay?.Expire();
+            currentOverlay = null;
+            return;
+        }
+
+        onPreviewTrackChanged(new ValueChangedEvent<PreviewTrackManager.TrackManagerPreviewTrack?>(previewTrack.Value, previewTrack.Value));
+    }
 }

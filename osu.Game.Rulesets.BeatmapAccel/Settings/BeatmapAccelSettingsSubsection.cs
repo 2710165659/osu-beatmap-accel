@@ -73,6 +73,18 @@ public partial class BeatmapAccelSettingsSubsection : RulesetSettingsSubsection
             }),
             wrapWithSettingsPadding(new FormCheckBox
             {
+                Caption = "谱面预览显示右上角弹窗",
+                HintText = "在播放谱面预览音频后，于右上角显示 BeatmapAccel 下载弹窗。关闭后不会弹窗，但其他下载接管功能仍可单独启用。",
+                Current = config.GetBindable<bool>(BeatmapAccelSetting.ShowPreviewDownloadOverlay)
+            }),
+            wrapWithSettingsPadding(new FormCheckBox
+            {
+                Caption = "接管所有谱面下载",
+                HintText = "高风险兼容模式。BeatmapAccel 会尝试接管当前界面的谱面下载按钮、自动缺谱面下载与下载状态追踪，让它们尽量走优选 IP。osu! 更新后可能失效，或导致少数页面下载状态显示异常。",
+                Current = config.GetBindable<bool>(BeatmapAccelSetting.InterceptAllBeatmapDownloads)
+            }),
+            wrapWithSettingsPadding(new FormCheckBox
+            {
                 Caption = "启动自动测速切换",
                 HintText = "游戏启动后后台测试内置 Cloudflare IP 段，并将后续下载切换到当前优选 IP。",
                 Current = config.GetBindable<bool>(BeatmapAccelSetting.AutoSwitchOnStartup)

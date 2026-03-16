@@ -20,6 +20,9 @@ public static class InjectorBootstrapper
         {
             try
             {
+                game.Add(new Download.GlobalBeatmapDownloadInterceptor());
+                BeatmapAccelLogging.Log("Injected global download interceptor.");
+
                 game.Add(new Download.PreviewTrackHandler());
                 BeatmapAccelLogging.Log("Injected proxy preview handler.");
             }

@@ -1,8 +1,3 @@
-using osu.Game.Beatmaps;
-using osu.Game.Database;
-using osu.Game.Extensions;
-using osu.Game.Online.API;
-using osu.Game.Overlays.Notifications;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -14,6 +9,11 @@ using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
+using osu.Game.Beatmaps;
+using osu.Game.Database;
+using osu.Game.Extensions;
+using osu.Game.Online.API;
+using osu.Game.Overlays.Notifications;
 
 namespace osu.Game.Rulesets.BeatmapAccel.Features.Download;
 
@@ -30,13 +30,18 @@ public partial class BeatmapAccelBeatmapModelDownloader
     private readonly List<PreferredIpDownloadBeatmapSetRequest> currentDownloads = new();
 
     private readonly IModelImporter<BeatmapSetInfo> beatmapImporter;
+    private readonly BeatmapManager? beatmapManager;
     private readonly IAPIProvider api;
 
     public BeatmapAccelBeatmapModelDownloader(IModelImporter<BeatmapSetInfo> beatmapImporter, IAPIProvider api)
     {
         this.beatmapImporter = beatmapImporter;
+        beatmapManager = beatmapImporter as BeatmapManager;
         this.api = api;
     }
+
+    public void SetPostNotification(Action<Notification>? postNotification)
+        => PostNotification = postNotification;
 
     public ArchiveDownloadRequest<IBeatmapSetInfo>? GetExistingDownload(IBeatmapSetInfo model)
     {
@@ -45,6 +50,12 @@ public partial class BeatmapAccelBeatmapModelDownloader
     }
 
     public bool Download(IBeatmapSetInfo model, bool minimiseDownloadSize = false)
+        => startDownload(model, minimiseDownloadSize, null);
+
+    public bool DownloadAsUpdate(BeatmapSetInfo originalModel, bool minimiseDownloadSize = false)
+        => startDownload(originalModel, minimiseDownloadSize, originalModel);
+
+    private bool startDownload(IBeatmapSetInfo model, bool minimiseDownloadSize, BeatmapSetInfo? originalModel)
     {
         if (GetExistingDownload(model) != null)
             return false;
@@ -63,13 +74,28 @@ public partial class BeatmapAccelBeatmapModelDownloader
 
         request.Success += filename =>
         {
-            Task.Factory.StartNew(async () =>
+            _ = Task.Run(async () =>
             {
                 bool importSuccessful = false;
 
                 try
                 {
-                    importSuccessful = (await beatmapImporter.Import(notification, new[] { new ImportTask(filename) }).ConfigureAwait(false)).Any();
+                    if (originalModel != null)
+                    {
+                        importSuccessful = await beatmapImporter.ImportAsUpdate(notification, new ImportTask(filename), originalModel).ConfigureAwait(false) != null;
+                        await waitForLocalAvailability(request.Model.OnlineID, request.CancellationToken).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        var imported = (await beatmapImporter.Import(notification, new[] { new ImportTask(filename) }).ConfigureAwait(false)).ToList();
+                        importSuccessful = imported.Any();
+
+                        if (importSuccessful)
+                        {
+                            repairImportedSetOnlineIds(imported, request.Model.OnlineID);
+                            await waitForLocalAvailability(request.Model.OnlineID, request.CancellationToken).ConfigureAwait(false);
+                        }
+                    }
                 }
                 finally
                 {
@@ -78,7 +104,7 @@ public partial class BeatmapAccelBeatmapModelDownloader
 
                     removeCurrentDownload(request);
                 }
-            }, TaskCreationOptions.LongRunning);
+            });
         };
 
         request.Failure += error =>
@@ -109,6 +135,56 @@ public partial class BeatmapAccelBeatmapModelDownloader
         return true;
     }
 
+    private void repairImportedSetOnlineIds(IReadOnlyList<Live<BeatmapSetInfo>> importedBeatmaps, int expectedOnlineId)
+    {
+        if (expectedOnlineId <= 0)
+            return;
+
+        foreach (Live<BeatmapSetInfo> imported in importedBeatmaps)
+        {
+            imported.PerformWrite(set =>
+            {
+                if (set.OnlineID > 0)
+                    return;
+
+                set.OnlineID = expectedOnlineId;
+                BeatmapAccelLogging.Log($"Repaired imported beatmap set online ID to {expectedOnlineId} for {set.GetDisplayString()}.");
+            });
+        }
+    }
+
+    private async Task waitForLocalAvailability(int onlineId, CancellationToken cancellationToken)
+    {
+        if (beatmapManager == null || onlineId <= 0)
+            return;
+
+        var beatmapSet = new BeatmapSetInfo { OnlineID = onlineId };
+
+        for (int i = 0; i < 40; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (beatmapManager.IsAvailableLocally(beatmapSet))
+                return;
+
+            await Task.Delay(250, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (!beatmapManager.IsAvailableLocally(beatmapSet))
+            BeatmapAccelLogging.Log($"Imported beatmap set {onlineId} did not become locally visible before the wait timeout expired.");
+    }
+
+    public void CancelAllDownloads()
+    {
+        PreferredIpDownloadBeatmapSetRequest[] activeDownloads;
+
+        lock (downloadsLock)
+            activeDownloads = currentDownloads.ToArray();
+
+        foreach (PreferredIpDownloadBeatmapSetRequest request in activeDownloads)
+            request.CancelDownload();
+    }
+
     private void removeCurrentDownload(PreferredIpDownloadBeatmapSetRequest request)
     {
         lock (downloadsLock)
@@ -137,6 +213,8 @@ public partial class BeatmapAccelBeatmapModelDownloader
         private readonly Stopwatch stopwatch = new();
 
         private int firstProgressLogged;
+
+        public CancellationToken CancellationToken => cancellationSource.Token;
 
         public PreferredIpDownloadBeatmapSetRequest(IBeatmapSetInfo set, bool noVideo, IAPIProvider api, string preferredIp)
             : base(set)

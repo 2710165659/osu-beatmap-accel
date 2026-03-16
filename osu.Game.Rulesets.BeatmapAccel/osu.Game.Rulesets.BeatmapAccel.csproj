@@ -8,6 +8,9 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <EmbeddedResource Include="Resources\**\*" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\..\osu\osu.Game\osu.Game.csproj" />
   </ItemGroup>
 </Project>

@@ -48,7 +48,7 @@ public partial class BeatmapAccelDownloadButton : HeaderDownloadButton
 
             baseButton.BackgroundColour = Color4Extensions.FromHex("#1580a6");
 
-            if (PreviewTrackHandler.Downloader != null)
+            if (BeatmapAccelDownloadRuntime.Downloader != null)
             {
                 baseButton.Action = () =>
                 {
@@ -60,7 +60,7 @@ public partial class BeatmapAccelDownloadButton : HeaderDownloadButton
                             return;
                         }
 
-                        PreviewTrackHandler.Downloader.Download(beatmapSet, noVideo);
+                        BeatmapAccelDownloadRuntime.Downloader.Download(beatmapSet, noVideo);
                     }
                     catch (Exception e)
                     {

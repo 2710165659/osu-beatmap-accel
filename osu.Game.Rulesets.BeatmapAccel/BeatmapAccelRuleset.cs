@@ -1,11 +1,10 @@
 using System;
 using System.Collections.Generic;
 using osu.Framework.Allocation;
-using osu.Framework.Extensions.Color4Extensions;
 using osu.Framework.Graphics;
-using osu.Framework.Graphics.Containers;
-using osu.Framework.Graphics.Shapes;
+using osu.Framework.Graphics.Rendering;
 using osu.Framework.Graphics.Sprites;
+using osu.Framework.Graphics.Textures;
 using osu.Framework.Input.Bindings;
 using osu.Game.Beatmaps;
 using osu.Game.Configuration;
@@ -50,35 +49,22 @@ public partial class BeatmapAccelRuleset : Ruleset
 
     public override IEnumerable<KeyBinding> GetDefaultKeyBindings(int variant = 0) => Array.Empty<KeyBinding>();
 
-    public override Drawable CreateIcon() => new Icon();
+    public override Drawable CreateIcon() => new Icon(this);
 
-    public partial class Icon : CompositeDrawable
+    public partial class Icon : Sprite
     {
-        public Icon()
-        {
-            Size = new Vector2(20);
+        private readonly Ruleset ruleset;
 
-            InternalChildren = new Drawable[]
-            {
-                new Circle
-                {
-                    RelativeSizeAxes = Axes.Both,
-                    Colour = Color4Extensions.FromHex("#1580a6"),
-                },
-                new SpriteIcon
-                {
-                    Anchor = Anchor.Centre,
-                    Origin = Anchor.Centre,
-                    RelativeSizeAxes = Axes.Both,
-                    Scale = new Vector2(0.55f),
-                    Icon = FontAwesome.Solid.Bolt,
-                }
-            };
+        public Icon(Ruleset ruleset)
+        {
+            this.ruleset = ruleset;
         }
 
         [BackgroundDependencyLoader(permitNulls: true)]
-        private void load(OsuGame? game)
+        private void load(IRenderer renderer, OsuGame? game)
         {
+            Texture = new TextureStore(renderer, new TextureLoaderStore(ruleset.CreateResourceStore()), false).Get("Textures/logo");
+
             if (game == null)
                 return;
 

@@ -256,7 +256,7 @@ public static class CloudflareSpeedTestManager
             if (tcpResults.Count == 0)
             {
                 stopwatch.Stop();
-                return finish(config, notifications, trigger, new SpeedTestSelectionResult(false, string.Empty, buildFailureSummary(trigger, candidates.Count, stopwatch.Elapsed)));
+                return await finishAsync(config, notifications, trigger, new SpeedTestSelectionResult(false, string.Empty, buildFailureSummary(trigger, candidates.Count, stopwatch.Elapsed))).ConfigureAwait(false);
             }
 
             List<TcpProbeResult> finalists = tcpResults.OrderBy(result => result.Latency).Take(http_probe_count).ToList();
@@ -266,8 +266,8 @@ public static class CloudflareSpeedTestManager
 
             if (httpResults.Count == 0)
             {
-                return finish(config, notifications, trigger,
-                    new SpeedTestSelectionResult(false, string.Empty, buildHttpFailureSummary(trigger, candidates.Count, tcpResults.Count, stopwatch.Elapsed)));
+                return await finishAsync(config, notifications, trigger,
+                    new SpeedTestSelectionResult(false, string.Empty, buildHttpFailureSummary(trigger, candidates.Count, tcpResults.Count, stopwatch.Elapsed))).ConfigureAwait(false);
             }
 
             HttpProbeResult winner = httpResults
@@ -277,7 +277,7 @@ public static class CloudflareSpeedTestManager
 
             await runOnMainThreadAsync(() => config.SetPreferredIp(winner.Ip)).ConfigureAwait(false);
 
-            return finish(config, notifications, trigger, new SpeedTestSelectionResult(true, winner.Ip, buildSuccessSummary(trigger, candidates.Count, tcpResults.Count, httpResults.Count, stopwatch.Elapsed, winner)));
+            return await finishAsync(config, notifications, trigger, new SpeedTestSelectionResult(true, winner.Ip, buildSuccessSummary(trigger, candidates.Count, tcpResults.Count, httpResults.Count, stopwatch.Elapsed, winner))).ConfigureAwait(false);
         }
         finally
         {
@@ -285,18 +285,18 @@ public static class CloudflareSpeedTestManager
         }
     }
 
-    private static SpeedTestSelectionResult finish(BeatmapAccelRulesetConfigManager config, INotificationOverlay? notifications, SpeedTestTrigger trigger, SpeedTestSelectionResult result)
+    private static async Task<SpeedTestSelectionResult> finishAsync(BeatmapAccelRulesetConfigManager config, INotificationOverlay? notifications, SpeedTestTrigger trigger, SpeedTestSelectionResult result)
     {
-        runOnMainThreadAsync(() => config.SetLastSpeedTestSummary(result.Message)).GetAwaiter().GetResult();
+        await runOnMainThreadAsync(() => config.SetLastSpeedTestSummary(result.Message)).ConfigureAwait(false);
 
         if (trigger == SpeedTestTrigger.Manual && notifications != null)
         {
-            runOnMainThreadAsync(() => notifications.Post(new SimpleNotification
+            await runOnMainThreadAsync(() => notifications.Post(new SimpleNotification
             {
                 Text = result.Success
                     ? $"BeatmapAccel: 当前已切换为 {result.SelectedIp}。\n{result.Message}"
                     : $"BeatmapAccel: 测速失败。\n{result.Message}"
-            })).GetAwaiter().GetResult();
+            })).ConfigureAwait(false);
         }
 
         return result;

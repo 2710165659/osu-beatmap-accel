@@ -21,14 +21,14 @@ public partial class BeatmapAccelBeatmapDownloadTracker : BeatmapDownloadTracker
     {
         base.LoadComplete();
 
-        if (PreviewTrackHandler.Downloader == null)
+        if (BeatmapAccelDownloadRuntime.Downloader == null)
         {
             BeatmapAccelLogging.Log("BeatmapAccel downloader is not ready yet.");
             return;
         }
 
-        PreviewTrackHandler.Downloader.DownloadBegan += onDownloadBegan;
-        PreviewTrackHandler.Downloader.DownloadFailed += onDownloadFailed;
+        BeatmapAccelDownloadRuntime.Downloader.DownloadBegan += onDownloadBegan;
+        BeatmapAccelDownloadRuntime.Downloader.DownloadFailed += onDownloadFailed;
         attachCurrentDownload();
     }
 
@@ -37,7 +37,7 @@ public partial class BeatmapAccelBeatmapDownloadTracker : BeatmapDownloadTracker
         if (request.Model.OnlineID != TrackedItem.OnlineID)
             return;
 
-        attachDownloadMethod?.Invoke(this, new object?[] { request });
+        Schedule(() => attachDownloadMethod?.Invoke(this, new object?[] { request }));
     }
 
     private void onDownloadFailed(ArchiveDownloadRequest<IBeatmapSetInfo> request)
@@ -45,13 +45,13 @@ public partial class BeatmapAccelBeatmapDownloadTracker : BeatmapDownloadTracker
         if (request.Model.OnlineID != TrackedItem.OnlineID)
             return;
 
-        attachCurrentDownload();
+        Schedule(attachCurrentDownload);
     }
 
     private void attachCurrentDownload()
     {
         var beatmapSetInfo = new BeatmapSetInfo { OnlineID = TrackedItem.OnlineID };
-        ArchiveDownloadRequest<IBeatmapSetInfo>? request = PreviewTrackHandler.Downloader?.GetExistingDownload(beatmapSetInfo);
+        ArchiveDownloadRequest<IBeatmapSetInfo>? request = BeatmapAccelDownloadRuntime.Downloader?.GetExistingDownload(beatmapSetInfo);
 
         attachDownloadMethod?.Invoke(this, new object?[] { request });
     }
@@ -60,10 +60,10 @@ public partial class BeatmapAccelBeatmapDownloadTracker : BeatmapDownloadTracker
     {
         base.Dispose(isDisposing);
 
-        if (PreviewTrackHandler.Downloader == null)
+        if (BeatmapAccelDownloadRuntime.Downloader == null)
             return;
 
-        PreviewTrackHandler.Downloader.DownloadBegan -= onDownloadBegan;
-        PreviewTrackHandler.Downloader.DownloadFailed -= onDownloadFailed;
+        BeatmapAccelDownloadRuntime.Downloader.DownloadBegan -= onDownloadBegan;
+        BeatmapAccelDownloadRuntime.Downloader.DownloadFailed -= onDownloadFailed;
     }
 }

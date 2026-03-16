@@ -16,12 +16,20 @@ public class BeatmapAccelRulesetConfigManager : RulesetConfigManager<BeatmapAcce
     protected override void InitialiseDefaults()
     {
         base.InitialiseDefaults();
+        SetDefault(BeatmapAccelSetting.ShowPreviewDownloadOverlay, true);
+        SetDefault(BeatmapAccelSetting.InterceptAllBeatmapDownloads, false);
         SetDefault(BeatmapAccelSetting.AutoSwitchOnStartup, true);
         SetDefault(BeatmapAccelSetting.AutoSwitchOnDownloadFailure, true);
         SetDefault(BeatmapAccelSetting.EnableIpv6Candidates, false);
         SetDefault(BeatmapAccelSetting.PreferredIp, string.Empty);
         SetDefault(BeatmapAccelSetting.LastSpeedTestSummary, "尚未测速");
     }
+
+    public bool GetShowPreviewDownloadOverlay()
+        => Get<bool>(BeatmapAccelSetting.ShowPreviewDownloadOverlay);
+
+    public bool GetInterceptAllBeatmapDownloads()
+        => Get<bool>(BeatmapAccelSetting.InterceptAllBeatmapDownloads);
 
     public bool GetAutoSwitchOnStartup()
         => Get<bool>(BeatmapAccelSetting.AutoSwitchOnStartup);
@@ -47,6 +55,8 @@ public class BeatmapAccelRulesetConfigManager : RulesetConfigManager<BeatmapAcce
 
 public enum BeatmapAccelSetting
 {
+    ShowPreviewDownloadOverlay,
+    InterceptAllBeatmapDownloads,
     AutoSwitchOnStartup,
     AutoSwitchOnDownloadFailure,
     EnableIpv6Candidates,
