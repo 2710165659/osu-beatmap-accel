@@ -1,0 +1,39 @@
+# .NET build output
+[Bb]in/
+[Oo]bj/
+artifacts/
+TestResults/
+
+# Visual Studio / Rider
+.vs/
+.idea/
+_ReSharper*/
+*.suo
+*.user
+*.userosscache
+*.rsuser
+*.sln.docstates
+*.DotSettings.user
+
+# NuGet / package artifacts
+packages/
+*.nupkg
+*.snupkg
+
+# Worker / Node local files
+node_modules/
+.wrangler/
+dist/
+coverage/
+.npm/
+.pnpm-store/
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
