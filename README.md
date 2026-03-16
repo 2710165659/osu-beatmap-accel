@@ -1,6 +1,6 @@
 # BeatmapAccel
 
-`BeatmapAccel` 是一个面向 `osu!lazer` 的谱面下载加速 ruleset。
+`BeatmapAccel` 是一个面向 `osu!lazer` 的谱面下载加速 ruleset。（Vibe Coding）
 
 它的目标很明确：
 
@@ -180,6 +180,8 @@ dotnet build .\osu.Game.Rulesets.BeatmapAccel\osu.Game.Rulesets.BeatmapAccel.csp
 ## 说明
 
 这个项目更偏实用型实验插件，不是对 `osu!lazer` 下载系统的官方替代实现。
+
+谱面预览，弹出下载按钮参照了[LLin](https://github.com/MATRIX-feather/LLin)。
 
 如果你只想要稳定可用的“下载加速”，建议优先使用预览弹窗模式。
 如果你想覆盖更多下载入口，再考虑开启全局接管模式。
