@@ -32,7 +32,6 @@ using osu.Game.Rulesets.BeatmapAccel.Configuration;
 using osu.Game.Rulesets.BeatmapAccel.Features.Injection;
 using osu.Game.Screens.OnlinePlay.DailyChallenge;
 using osu.Game.Screens.OnlinePlay.Matchmaking.Match;
-using osu.Game.Screens.OnlinePlay.Matchmaking.RankedPlay;
 using osu.Game.Screens.OnlinePlay.Multiplayer.Match;
 using osu.Game.Screens.Play;
 using osu.Game.Screens.Select;
@@ -43,6 +42,7 @@ namespace osu.Game.Rulesets.BeatmapAccel.Features.Download;
 public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 {
     private const double scan_interval = 1000;
+    private const string ranked_play_screen_type_name = "osu.Game.Screens.OnlinePlay.Matchmaking.RankedPlay.RankedPlayScreen";
 
     private static readonly BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
     private static readonly PropertyInfo? internalChildrenProperty = typeof(CompositeDrawable).GetProperty("InternalChildren", flags);
@@ -194,12 +194,6 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
                 handleMatchmakingAutomaticDownload(matchmakingScreen);
                 break;
 
-            case RankedPlayScreen rankedPlayScreen:
-                seen.Add(rankedPlayScreen);
-                disableDownloaderMember(rankedPlayScreen, "beatmapDownloader");
-                handleRankedPlayAutomaticDownload(rankedPlayScreen);
-                break;
-
             case MultiplayerSpectateButton multiplayerSpectateButton:
                 seen.Add(multiplayerSpectateButton);
                 disableDownloaderMember(multiplayerSpectateButton, "beatmapDownloader");
@@ -215,6 +209,13 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
             case PanelUpdateBeatmapButton panelUpdateBeatmapButton:
                 patchPanelUpdateBeatmapButton(panelUpdateBeatmapButton, seen);
                 break;
+        }
+
+        if (isTypeOrSubclass(drawable, ranked_play_screen_type_name))
+        {
+            seen.Add(drawable);
+            disableDownloaderMember(drawable, "beatmapDownloader");
+            handleRankedPlayAutomaticDownload(drawable);
         }
     }
 
@@ -447,7 +448,7 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
         queueLookupDownload(screen, client.Room.CurrentPlaylistItem.BeatmapID, osuConfig?.Get<bool>(OsuSetting.PreferNoVideo) == true);
     }
 
-    private void handleRankedPlayAutomaticDownload(RankedPlayScreen screen)
+    private void handleRankedPlayAutomaticDownload(object screen)
     {
         MultiplayerClient? client = getMemberValue<MultiplayerClient>(screen, "client");
 
@@ -720,6 +721,17 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
     {
         MemberInfo? member = getMember(owner.GetType(), memberName);
         return member == null ? default : (T?)getMemberValue(member, owner);
+    }
+
+    private static bool isTypeOrSubclass(object owner, string fullTypeName)
+    {
+        for (Type? current = owner.GetType(); current != null; current = current.BaseType)
+        {
+            if (current.FullName == fullTypeName)
+                return true;
+        }
+
+        return false;
     }
 
     private sealed record MemberPatch(object Owner, MemberInfo Member, object OriginalValue);
