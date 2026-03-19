@@ -4,9 +4,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
-using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using osu.Game.Beatmaps;
@@ -20,7 +17,7 @@ namespace osu.Game.Rulesets.BeatmapAccel.Features.Download;
 
 public partial class BeatmapAccelBeatmapModelDownloader
 {
-    private static readonly IBeatmapAccelRuntimeStrategy runtime = BeatmapAccelRuntime.Current;
+    private static readonly IBeatmapAccelPlatformRuntime runtime = BeatmapAccelCompatibility.Current;
 
     public Action<Notification>? PostNotification { private get; set; }
 
@@ -207,6 +204,7 @@ public partial class BeatmapAccelBeatmapModelDownloader
     private sealed class PreferredIpDownloadBeatmapSetRequest : ArchiveDownloadRequest<IBeatmapSetInfo>
     {
         private const string download_host = "osu.ppy.sh";
+        private static readonly TimeSpan download_timeout = TimeSpan.FromSeconds(60);
 
         private readonly bool noVideo;
         private readonly IAPIProvider api;
@@ -257,47 +255,23 @@ public partial class BeatmapAccelBeatmapModelDownloader
         {
             try
             {
-                using var handler = createHandler();
-                using var client = runtime.CreateHttpClient(handler);
-                using var request = new HttpRequestMessage(HttpMethod.Get, Uri);
+                using var requestTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationSource.Token);
+                requestTimeout.CancelAfter(download_timeout);
 
-                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", api.AccessToken);
-                runtime.SetRequestHeader(request, "User-Agent", "osu!");
-                runtime.SetRequestHeader(request, "Accept-Language", api.Language.ToCultureCode());
-                runtime.SetRequestHeader(request, "x-api-version", api.APIVersion.ToString());
+                await runtime.DownloadFileAsync(new PreferredIpFileDownloadRequest(
+                    new System.Uri(this.Uri),
+                    parsePreferredIp(),
+                    targetFilePath,
+                    TimeSpan.FromSeconds(15),
+                    createHeaders(),
+                    (currentBytes, totalBytes) =>
+                    {
+                        if (Interlocked.Exchange(ref firstProgressLogged, 1) == 0)
+                            BeatmapAccelLogging.Log($"Preferred-IP download received first progress for beatmap set {Model.OnlineID} after {stopwatch.ElapsedMilliseconds} ms.");
 
-                using HttpResponseMessage response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationSource.Token).ConfigureAwait(false);
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    string body = await runtime.ReadHttpStringAsync(response.Content, cancellationSource.Token).ConfigureAwait(false);
-                    throw new InvalidOperationException($"HTTP {(int)response.StatusCode} {response.ReasonPhrase} {body}");
-                }
-
-                long totalBytes = response.Content.Headers.ContentLength ?? -1;
-                long currentBytes = 0;
-
-                using Stream input = await runtime.ReadHttpStreamAsync(response.Content, cancellationSource.Token).ConfigureAwait(false);
-                await using FileStream output = new(targetFilePath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, useAsync: true);
-
-                byte[] buffer = new byte[81920];
-
-                while (true)
-                {
-                    int read = await runtime.ReadStreamAsync(input, buffer, 0, buffer.Length, cancellationSource.Token).ConfigureAwait(false);
-
-                    if (read <= 0)
-                        break;
-
-                    await runtime.WriteStreamAsync(output, buffer, 0, read, cancellationSource.Token).ConfigureAwait(false);
-                    currentBytes += read;
-
-                    if (Interlocked.Exchange(ref firstProgressLogged, 1) == 0)
-                        BeatmapAccelLogging.Log($"Preferred-IP download received first progress for beatmap set {Model.OnlineID} after {stopwatch.ElapsedMilliseconds} ms.");
-
-                    if (totalBytes > 0)
-                        SetProgress((float)currentBytes / totalBytes);
-                }
+                        if (totalBytes.HasValue && totalBytes.Value > 0)
+                            SetProgress((float)currentBytes / totalBytes.Value);
+                    }), requestTimeout.Token).ConfigureAwait(false);
 
                 SetProgress(1);
                 BeatmapAccelLogging.Log($"Preferred-IP download finished transfer for beatmap set {Model.OnlineID} in {stopwatch.ElapsedMilliseconds} ms.");
@@ -310,12 +284,24 @@ public partial class BeatmapAccelBeatmapModelDownloader
             }
         }
 
-        private SocketsHttpHandler createHandler()
-            => runtime.CreatePreferredIpHttpHandler(new PreferredIpHttpHandlerOptions(
-                !string.IsNullOrWhiteSpace(preferredIp) && IPAddress.TryParse(preferredIp, out IPAddress? ipAddress) ? ipAddress : null,
-                AllowAutoRedirect: true,
-                AutomaticDecompression: DecompressionMethods.All,
-                ConnectTimeout: TimeSpan.FromSeconds(15)));
+        private IPAddress? parsePreferredIp()
+        {
+            if (string.IsNullOrWhiteSpace(preferredIp))
+                return null;
+
+            return IPAddress.TryParse(preferredIp, out IPAddress? ipAddress) ? ipAddress : null;
+        }
+
+        private BeatmapAccelHttpHeader[] createHeaders()
+        {
+            return new[]
+            {
+                new BeatmapAccelHttpHeader("Authorization", $"Bearer {api.AccessToken}"),
+                new BeatmapAccelHttpHeader("User-Agent", "osu!"),
+                new BeatmapAccelHttpHeader("Accept-Language", api.Language.ToCultureCode()),
+                new BeatmapAccelHttpHeader("x-api-version", api.APIVersion.ToString())
+            };
+        }
 
         private void cleanupTargetFile()
         {

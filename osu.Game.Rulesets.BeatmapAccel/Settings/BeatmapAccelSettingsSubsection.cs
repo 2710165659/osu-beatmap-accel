@@ -34,6 +34,7 @@ public partial class BeatmapAccelSettingsSubsection : RulesetSettingsSubsection
         var config = (BeatmapAccelRulesetConfigManager)Config;
 
         CloudflareSpeedTestManager.ScheduleToMainThread = action => Schedule(action);
+        CloudflareSpeedTestManager.NotificationPoster = notifications == null ? null : new Action<Notification>(notifications.Post);
 
         Children = new Drawable[]
         {

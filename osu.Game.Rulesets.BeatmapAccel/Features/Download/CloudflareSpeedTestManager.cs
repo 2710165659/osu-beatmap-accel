@@ -8,7 +8,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Net;
-using System.Net.Http;
 using System.Net.Sockets;
 using System.Numerics;
 using System.Threading;
@@ -21,12 +20,7 @@ public static class CloudflareSpeedTestManager
     private const string probe_host = "osu.ppy.sh";
     private const int ipv4_samples_per_range = 2;
     private const int ipv6_samples_per_range = 1;
-    private const int tcp_probe_concurrency = 16;
-    private const int http_probe_concurrency = 6;
     private const int http_probe_count = 8;
-
-    private static readonly TimeSpan tcp_probe_timeout = TimeSpan.FromMilliseconds(1200);
-    private static readonly TimeSpan http_probe_timeout = TimeSpan.FromMilliseconds(2500);
     private static readonly string[] cloudflare_ipv4_ranges =
     {
         "173.245.48.0/20",
@@ -163,12 +157,23 @@ public static class CloudflareSpeedTestManager
     };
 
     private static readonly SemaphoreSlim switchLock = new(1, 1);
-    private static readonly IBeatmapAccelRuntimeStrategy runtime = BeatmapAccelRuntime.Current;
+    private static readonly IBeatmapAccelPlatformRuntime runtime = BeatmapAccelCompatibility.Current;
+    private static readonly TimeSpan default_tcp_probe_timeout = TimeSpan.FromMilliseconds(1200);
+    private static readonly TimeSpan mobile_tcp_probe_timeout = TimeSpan.FromMilliseconds(3000);
+    private static readonly TimeSpan mobile_tcp_probe_retry_timeout = TimeSpan.FromMilliseconds(5000);
+    private static readonly TimeSpan default_http_probe_timeout = TimeSpan.FromMilliseconds(2500);
+    private static readonly TimeSpan mobile_http_probe_timeout = TimeSpan.FromMilliseconds(5000);
+    private static readonly TimeSpan default_speed_test_timeout = TimeSpan.FromSeconds(25);
+    private static readonly TimeSpan mobile_speed_test_timeout = TimeSpan.FromSeconds(30);
 
     private static int startupSwitchTriggered;
     private static int failureRecoveryTriggered;
 
+    private const int failure_detail_limit = 3;
+    private const int mobile_retry_candidate_limit = 8;
+
     public static Action<Action>? ScheduleToMainThread { get; set; }
+    public static Action<Notification>? NotificationPoster { get; set; }
 
     public static string GetPreferredIp()
         => BeatmapAccelRulesetConfigManager.Instance?.GetPreferredIp() ?? string.Empty;
@@ -221,18 +226,18 @@ public static class CloudflareSpeedTestManager
                 if (result.Success)
                 {
                     BeatmapAccelLogging.Log($"Download failure recovery speed test selected {result.SelectedIp}. {result.Message}");
-                    postNotification?.Invoke(new SimpleNotification
+                    postNotificationOrFallback(new SimpleNotification
                     {
                         Text = $"BeatmapAccel: 下载失败后已切换为 {result.SelectedIp}。\n{result.Message}"
-                    });
+                    }, postNotification);
                 }
                 else
                 {
                     BeatmapAccelLogging.Log($"Download failure recovery speed test failed: {result.Message}");
-                    postNotification?.Invoke(new SimpleNotification
+                    postNotificationOrFallback(new SimpleNotification
                     {
                         Text = $"BeatmapAccel: 下载失败后重测速失败。{result.Message}"
-                    });
+                    }, postNotification);
                 }
             }
             finally
@@ -244,7 +249,10 @@ public static class CloudflareSpeedTestManager
 
     public static async Task<SpeedTestSelectionResult> SwitchToFastestIpAsync(SpeedTestTrigger trigger, INotificationOverlay? notifications = null, CancellationToken cancellationToken = default)
     {
-        await switchLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var overallTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        overallTimeout.CancelAfter(getOverallSpeedTestTimeout());
+
+        await switchLock.WaitAsync(overallTimeout.Token).ConfigureAwait(false);
 
         try
         {
@@ -255,23 +263,30 @@ public static class CloudflareSpeedTestManager
 
             Stopwatch stopwatch = Stopwatch.StartNew();
             List<ProbeCandidate> candidates = buildCandidates(config.GetPreferredIp());
-            List<TcpProbeResult> tcpResults = await probeTcpCandidatesAsync(candidates, cancellationToken).ConfigureAwait(false);
+            BeatmapAccelLogging.Log($"Speed test built {candidates.Count} candidates on {runtime.Name} runtime strategy.");
+            List<TcpProbeResult> tcpResults = await probeTcpCandidatesAsync(candidates, overallTimeout.Token).ConfigureAwait(false);
+
+            if (tcpResults.Count == 0 && runtime.PreferConservativeNetworking)
+            {
+                BeatmapAccelLogging.Log("No TCP speed test candidates succeeded on conservative runtime. Retrying with reduced concurrency and longer timeout.");
+                tcpResults = await probeTcpCandidatesAsync(candidates.Take(mobile_retry_candidate_limit), overallTimeout.Token, 1, mobile_tcp_probe_retry_timeout).ConfigureAwait(false);
+            }
 
             if (tcpResults.Count == 0)
             {
                 stopwatch.Stop();
-                return await finishAsync(config, notifications, trigger, new SpeedTestSelectionResult(false, string.Empty, buildFailureSummary(trigger, candidates.Count, stopwatch.Elapsed))).ConfigureAwait(false);
+                return await finishAsync(config, notifications, trigger, new SpeedTestSelectionResult(false, string.Empty, buildFailureSummary(trigger, candidates.Count, stopwatch.Elapsed, candidates))).ConfigureAwait(false);
             }
 
             List<TcpProbeResult> finalists = tcpResults.OrderBy(result => result.Latency).Take(http_probe_count).ToList();
-            List<HttpProbeResult> httpResults = await probeHttpCandidatesAsync(finalists, cancellationToken).ConfigureAwait(false);
+            List<HttpProbeResult> httpResults = await probeHttpCandidatesAsync(finalists, overallTimeout.Token).ConfigureAwait(false);
 
             stopwatch.Stop();
 
             if (httpResults.Count == 0)
             {
                 return await finishAsync(config, notifications, trigger,
-                    new SpeedTestSelectionResult(false, string.Empty, buildHttpFailureSummary(trigger, candidates.Count, tcpResults.Count, stopwatch.Elapsed))).ConfigureAwait(false);
+                    new SpeedTestSelectionResult(false, string.Empty, buildHttpFailureSummary(trigger, candidates.Count, tcpResults.Count, stopwatch.Elapsed, finalists))).ConfigureAwait(false);
             }
 
             HttpProbeResult winner = httpResults
@@ -282,6 +297,10 @@ public static class CloudflareSpeedTestManager
             await runOnMainThreadAsync(() => config.SetPreferredIp(winner.Ip)).ConfigureAwait(false);
 
             return await finishAsync(config, notifications, trigger, new SpeedTestSelectionResult(true, winner.Ip, buildSuccessSummary(trigger, candidates.Count, tcpResults.Count, httpResults.Count, stopwatch.Elapsed, winner))).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (overallTimeout.IsCancellationRequested)
+        {
+            return new SpeedTestSelectionResult(false, string.Empty, $"测速超时：在 {getOverallSpeedTestTimeout().TotalSeconds:F0}s 内未能完成。");
         }
         finally
         {
@@ -295,7 +314,16 @@ public static class CloudflareSpeedTestManager
 
         if (trigger == SpeedTestTrigger.Manual && notifications != null)
         {
-            await runOnMainThreadAsync(() => notifications.Post(new SimpleNotification
+            await runOnMainThreadAsync(() => postNotificationOrFallback(new SimpleNotification
+            {
+                Text = result.Success
+                    ? $"BeatmapAccel: 当前已切换为 {result.SelectedIp}。\n{result.Message}"
+                    : $"BeatmapAccel: 测速失败。\n{result.Message}"
+            }, notifications.Post)).ConfigureAwait(false);
+        }
+        else if (trigger == SpeedTestTrigger.Manual)
+        {
+            await runOnMainThreadAsync(() => postNotificationOrFallback(new SimpleNotification
             {
                 Text = result.Success
                     ? $"BeatmapAccel: 当前已切换为 {result.SelectedIp}。\n{result.Message}"
@@ -330,6 +358,11 @@ public static class CloudflareSpeedTestManager
         });
 
         return completionSource.Task;
+    }
+
+    private static void postNotificationOrFallback(Notification notification, Action<Notification>? preferredPoster = null)
+    {
+        (preferredPoster ?? NotificationPoster)?.Invoke(notification);
     }
 
     private static List<ProbeCandidate> buildCandidates(string preferredIp)
@@ -404,12 +437,15 @@ public static class CloudflareSpeedTestManager
     }
 
     private static async Task<List<TcpProbeResult>> probeTcpCandidatesAsync(IEnumerable<ProbeCandidate> candidates, CancellationToken cancellationToken)
+        => await probeTcpCandidatesAsync(candidates, cancellationToken, getTcpProbeConcurrency(), getTcpProbeTimeout()).ConfigureAwait(false);
+
+    private static async Task<List<TcpProbeResult>> probeTcpCandidatesAsync(IEnumerable<ProbeCandidate> candidates, CancellationToken cancellationToken, int maxConcurrency, TimeSpan timeout)
     {
         var results = new ConcurrentBag<TcpProbeResult>();
 
-        await runtime.ForEachAsync(candidates, tcp_probe_concurrency, cancellationToken, async (candidate, token) =>
+        await runtime.ForEachAsync(candidates, maxConcurrency, cancellationToken, async (candidate, token) =>
         {
-            TcpProbeResult result = await probeTcpAsync(candidate, token).ConfigureAwait(false);
+            TcpProbeResult result = await probeTcpAsync(candidate, timeout, token).ConfigureAwait(false);
             if (result.Success)
                 results.Add(result);
         }).ConfigureAwait(false);
@@ -417,13 +453,13 @@ public static class CloudflareSpeedTestManager
         return results.ToList();
     }
 
-    private static async Task<TcpProbeResult> probeTcpAsync(ProbeCandidate candidate, CancellationToken cancellationToken)
+    private static async Task<TcpProbeResult> probeTcpAsync(ProbeCandidate candidate, TimeSpan timeoutDuration, CancellationToken cancellationToken)
     {
         if (!IPAddress.TryParse(candidate.Ip, out IPAddress? address))
-            return new TcpProbeResult(candidate, false, TimeSpan.MaxValue);
+            return new TcpProbeResult(candidate, false, TimeSpan.MaxValue, "invalid ip");
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(tcp_probe_timeout);
+        timeout.CancelAfter(timeoutDuration);
 
         Stopwatch stopwatch = Stopwatch.StartNew();
 
@@ -436,12 +472,12 @@ public static class CloudflareSpeedTestManager
 
             await runtime.ConnectSocketAsync(socket, address, 443, timeout.Token).ConfigureAwait(false);
             stopwatch.Stop();
-            return new TcpProbeResult(candidate, true, stopwatch.Elapsed);
+            return new TcpProbeResult(candidate, true, stopwatch.Elapsed, null);
         }
-        catch
+        catch (Exception e)
         {
             stopwatch.Stop();
-            return new TcpProbeResult(candidate, false, TimeSpan.MaxValue);
+            return new TcpProbeResult(candidate, false, TimeSpan.MaxValue, describeProbeError(e));
         }
     }
 
@@ -449,7 +485,7 @@ public static class CloudflareSpeedTestManager
     {
         var results = new ConcurrentBag<HttpProbeResult>();
 
-        await runtime.ForEachAsync(finalists, http_probe_concurrency, cancellationToken, async (candidate, token) =>
+        await runtime.ForEachAsync(finalists, getHttpProbeConcurrency(), cancellationToken, async (candidate, token) =>
         {
             HttpProbeResult? result = await probeHttpAsync(candidate, token).ConfigureAwait(false);
             if (result != null)
@@ -465,38 +501,25 @@ public static class CloudflareSpeedTestManager
             return null;
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(http_probe_timeout);
-
-        using var handler = runtime.CreatePreferredIpHttpHandler(new PreferredIpHttpHandlerOptions(
-            address,
-            AllowAutoRedirect: false,
-            AutomaticDecompression: DecompressionMethods.None,
-            ConnectTimeout: tcp_probe_timeout,
-            PooledConnectionLifetime: TimeSpan.Zero,
-            PooledConnectionIdleTimeout: TimeSpan.Zero));
-
-        using var client = runtime.CreateHttpClient(handler);
-
-        using var request = new HttpRequestMessage(HttpMethod.Get, $"https://{probe_host}/");
-        runtime.SetRequestHeader(request, "User-Agent", "BeatmapAccel-SpeedTest");
-
-        Stopwatch stopwatch = Stopwatch.StartNew();
+        timeout.CancelAfter(getHttpProbeTimeout());
 
         try
         {
-            using HttpResponseMessage response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
-            stopwatch.Stop();
+            PreferredIpHttpProbeResponse? response = await runtime.ProbePreferredIpHttpAsync(new PreferredIpHttpProbeRequest(
+                address,
+                probe_host,
+                "/",
+                "BeatmapAccel-SpeedTest",
+                getTcpProbeTimeout()), timeout.Token).ConfigureAwait(false);
 
-            int statusCode = (int)response.StatusCode;
-
-            if (statusCode >= 500)
+            if (response == null || (int)response.Value.StatusCode >= 500)
                 return null;
 
-            return new HttpProbeResult(candidate.Candidate, candidate.Latency, stopwatch.Elapsed, response.StatusCode);
+            return new HttpProbeResult(candidate.Candidate, candidate.Latency, response.Value.Latency, response.Value.StatusCode, null);
         }
-        catch
+        catch (Exception e)
         {
-            stopwatch.Stop();
+            BeatmapAccelLogging.Log($"HTTP probe failed for {candidate.Candidate.Ip}: {describeProbeError(e)}");
             return null;
         }
     }
@@ -590,11 +613,49 @@ public static class CloudflareSpeedTestManager
         return result;
     }
 
-    private static string buildFailureSummary(SpeedTestTrigger trigger, int candidateCount, TimeSpan elapsed)
-        => $"{describeTrigger(trigger)}：{candidateCount} 个候选 IP 全部 TCP 连接失败，总耗时 {elapsed.TotalSeconds:F1}s";
+    private static int getTcpProbeConcurrency()
+        => runtime.PreferConservativeNetworking ? 4 : 16;
 
-    private static string buildHttpFailureSummary(SpeedTestTrigger trigger, int candidateCount, int tcpSuccessCount, TimeSpan elapsed)
-        => $"{describeTrigger(trigger)}：{candidateCount} 个候选 IP 中 {tcpSuccessCount} 个 TCP 可达，但 HTTP 复测全部失败，总耗时 {elapsed.TotalSeconds:F1}s";
+    private static int getHttpProbeConcurrency()
+        => runtime.PreferConservativeNetworking ? 2 : 6;
+
+    private static TimeSpan getTcpProbeTimeout()
+        => runtime.PreferConservativeNetworking ? mobile_tcp_probe_timeout : default_tcp_probe_timeout;
+
+    private static TimeSpan getHttpProbeTimeout()
+        => runtime.PreferConservativeNetworking ? mobile_http_probe_timeout : default_http_probe_timeout;
+
+    private static TimeSpan getOverallSpeedTestTimeout()
+        => runtime.PreferConservativeNetworking ? mobile_speed_test_timeout : default_speed_test_timeout;
+
+    private static string buildFailureSummary(SpeedTestTrigger trigger, int candidateCount, TimeSpan elapsed, IEnumerable<ProbeCandidate> candidates)
+    {
+        string detail = string.Join("；", candidates
+                                         .Select(candidate => candidate.LastTcpFailure)
+                                         .Where(message => !string.IsNullOrWhiteSpace(message))
+                                         .Distinct()
+                                         .Take(failure_detail_limit)!);
+
+        if (!string.IsNullOrWhiteSpace(detail))
+            BeatmapAccelLogging.Log($"Speed test TCP failures: {detail}");
+
+        return string.IsNullOrWhiteSpace(detail)
+            ? $"{describeTrigger(trigger)}：{candidateCount} 个候选 IP 全部 TCP 连接失败，总耗时 {elapsed.TotalSeconds:F1}s"
+            : $"{describeTrigger(trigger)}：{candidateCount} 个候选 IP 全部 TCP 连接失败，总耗时 {elapsed.TotalSeconds:F1}s。原因：{detail}";
+    }
+
+    private static string buildHttpFailureSummary(SpeedTestTrigger trigger, int candidateCount, int tcpSuccessCount, TimeSpan elapsed, IEnumerable<TcpProbeResult> finalists)
+    {
+        string detail = string.Join("；", finalists
+                                         .Select(result => result.FailureReason)
+                                         .Where(message => !string.IsNullOrWhiteSpace(message))
+                                         .Distinct()
+                                         .Take(failure_detail_limit)!);
+
+        return string.IsNullOrWhiteSpace(detail)
+            ? $"{describeTrigger(trigger)}：{candidateCount} 个候选 IP 中 {tcpSuccessCount} 个 TCP 可达，但 HTTP 复测全部失败，总耗时 {elapsed.TotalSeconds:F1}s"
+            : $"{describeTrigger(trigger)}：{candidateCount} 个候选 IP 中 {tcpSuccessCount} 个 TCP 可达，但 HTTP 复测全部失败，总耗时 {elapsed.TotalSeconds:F1}s。TCP 失败细节：{detail}";
+    }
 
     private static string buildSuccessSummary(SpeedTestTrigger trigger, int candidateCount, int tcpSuccessCount, int httpSuccessCount, TimeSpan elapsed, HttpProbeResult winner)
         => $"{describeTrigger(trigger)}：{candidateCount} 个候选中 {tcpSuccessCount} 个 TCP 可达，{httpSuccessCount} 个 HTTP 复测成功，已选 {winner.Ip}（{winner.Candidate.Cidr}，TCP {winner.TcpLatency.TotalMilliseconds:F0} ms，HTTP {winner.HttpLatency.TotalMilliseconds:F0} ms，状态 {(int)winner.StatusCode}），总耗时 {elapsed.TotalSeconds:F1}s";
@@ -607,11 +668,47 @@ public static class CloudflareSpeedTestManager
             _ => "手动测速"
         };
 
-    private sealed record ProbeCandidate(string Cidr, string Ip, bool IsCurrent);
+    private static string describeProbeError(Exception error)
+    {
+        string message = error switch
+        {
+            OperationCanceledException => "timeout",
+            SocketException socketException => $"socket {socketException.SocketErrorCode}: {socketException.Message}",
+            _ => $"{error.GetType().Name}: {error.Message}"
+        };
 
-    private sealed record TcpProbeResult(ProbeCandidate Candidate, bool Success, TimeSpan Latency);
+        BeatmapAccelLogging.Log($"Speed test probe error: {message}");
+        return message;
+    }
 
-    private sealed record HttpProbeResult(ProbeCandidate Candidate, TimeSpan TcpLatency, TimeSpan HttpLatency, HttpStatusCode StatusCode)
+    private sealed record ProbeCandidate(string Cidr, string Ip, bool IsCurrent)
+    {
+        public string? LastTcpFailure { get; set; }
+    }
+
+    private sealed class TcpProbeResult
+    {
+        public ProbeCandidate Candidate { get; }
+
+        public bool Success { get; }
+
+        public TimeSpan Latency { get; }
+
+        public string? FailureReason { get; }
+
+        public TcpProbeResult(ProbeCandidate candidate, bool success, TimeSpan latency, string? failureReason)
+        {
+            Candidate = candidate;
+            Success = success;
+            Latency = latency;
+            FailureReason = failureReason;
+
+            if (!Success && !string.IsNullOrWhiteSpace(FailureReason))
+                Candidate.LastTcpFailure = FailureReason;
+        }
+    }
+
+    private sealed record HttpProbeResult(ProbeCandidate Candidate, TimeSpan TcpLatency, TimeSpan HttpLatency, HttpStatusCode StatusCode, string? FailureReason)
     {
         public string Ip => Candidate.Ip;
     }

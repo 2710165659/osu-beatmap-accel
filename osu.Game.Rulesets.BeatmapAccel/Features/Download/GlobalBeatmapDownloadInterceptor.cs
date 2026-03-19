@@ -91,7 +91,8 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
             return;
         }
 
-        BeatmapAccelDownloadRuntime.EnsureInitialized(beatmapManager, apiProvider, notifications == null ? null : notifications.Post);
+        BeatmapAccelDownloadRuntime.EnsureInitialized(beatmapManager, apiProvider, notifications == null ? null : new Action<Notification>(notifications.Post));
+        CloudflareSpeedTestManager.NotificationPoster = notifications == null ? null : new Action<Notification>(notifications.Post);
 
         if (originalDownloader != null)
         {
@@ -113,7 +114,8 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
     {
         base.Update();
 
-        BeatmapAccelDownloadRuntime.UpdateNotificationPoster(notifications == null ? null : notifications.Post);
+        BeatmapAccelDownloadRuntime.UpdateNotificationPoster(notifications == null ? null : new Action<Notification>(notifications.Post));
+        CloudflareSpeedTestManager.NotificationPoster = notifications == null ? null : new Action<Notification>(notifications.Post);
 
         if (interceptAllDownloads?.Value != true || BeatmapAccelDownloadRuntime.Downloader == null)
             return;
