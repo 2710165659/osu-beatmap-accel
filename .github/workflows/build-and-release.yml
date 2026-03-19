@@ -72,8 +72,8 @@ jobs:
         with:
           tag_name: auto-build
           name: Auto Build
-          prerelease: true
-          make_latest: false
+          prerelease: false
+          make_latest: true
           generate_release_notes: false
           overwrite_files: true
           body: |
