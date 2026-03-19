@@ -41,11 +41,12 @@ namespace osu.Game.Rulesets.BeatmapAccel.Features.Download;
 
 public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 {
-    private const double scan_interval = 250;
     private const string ranked_play_screen_type_name = "osu.Game.Screens.OnlinePlay.Matchmaking.RankedPlay.RankedPlayScreen";
 
     private static readonly BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
     private static readonly PropertyInfo? internalChildrenProperty = typeof(CompositeDrawable).GetProperty("InternalChildren", flags);
+    private static readonly EventInfo? childBecameAliveEvent = typeof(CompositeDrawable).GetEvent("ChildBecameAlive", flags);
+    private static readonly EventInfo? childDiedEvent = typeof(CompositeDrawable).GetEvent("ChildDied", flags);
     private static readonly FieldInfo? noVideoField = typeof(DownloadBeatmapSetRequest).GetField("noVideo", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly Dictionary<(Type Type, string Name), MemberInfo?> memberCache = new();
     private static readonly Dictionary<(Type Type, string Name), FieldInfo?> fieldCache = new();
@@ -70,17 +71,15 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
     private BeatmapModelDownloader? originalDownloader { get; set; }
 
     private IBindable<bool>? interceptAllDownloads;
-    private double lastScanTime;
+    private bool interceptionActive;
     private MemberInfo? originalDownloaderNotificationMember;
     private Action<Notification>? originalDownloaderNotificationTarget;
 
     private readonly Dictionary<object, ActionPatch> actionPatches = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<CompositeDrawable, CompositeObserver> compositeObservers = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<object, MemberPatch> downloaderMemberPatches = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<BeatmapDownloadTracker, TrackerBridge> trackerBridges = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<object, int> automaticDownloadAttempts = new(ReferenceEqualityComparer.Instance);
-    private readonly HashSet<object> seenDrawables = new(ReferenceEqualityComparer.Instance);
-    private readonly Stack<Drawable> drawableScanStack = new();
-    private readonly List<object> staleKeys = new();
 
     [BackgroundDependencyLoader]
     private void load()
@@ -107,35 +106,23 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
             return;
 
         interceptAllDownloads = BeatmapAccelRulesetConfigManager.Instance.GetBindable<bool>(BeatmapAccelSetting.InterceptAllBeatmapDownloads);
-        interceptAllDownloads.BindValueChanged(onInterceptionChanged, true);
+        interceptAllDownloads.BindValueChanged(onInterceptionChanged);
     }
 
-    protected override void Update()
+    protected override void LoadComplete()
     {
-        base.Update();
+        base.LoadComplete();
 
-        BeatmapAccelDownloadRuntime.UpdateNotificationPoster(notifications == null ? null : new Action<Notification>(notifications.Post));
-        CloudflareSpeedTestManager.NotificationPoster = notifications == null ? null : new Action<Notification>(notifications.Post);
-
-        if (interceptAllDownloads?.Value != true || BeatmapAccelDownloadRuntime.Downloader == null)
-            return;
-
-        if (Time.Current - lastScanTime < scan_interval)
-            return;
-
-        lastScanTime = Time.Current;
-        scanAndPatch();
+        if (interceptAllDownloads != null)
+            onInterceptionChanged(new ValueChangedEvent<bool>(false, interceptAllDownloads.Value));
     }
 
     private void onInterceptionChanged(ValueChangedEvent<bool> change)
     {
         if (change.NewValue)
-        {
-            lastScanTime = 0;
-            scanAndPatch();
-        }
+            beginInterception();
         else
-            restorePatchedState();
+            endInterception();
     }
 
     private void hookOriginalDownloaderNotifications()
@@ -169,101 +156,225 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
         originalDownloaderNotificationTarget?.Invoke(notification);
     }
 
-    private void scanAndPatch()
+    private void beginInterception()
     {
-        if (Parent is not Drawable root)
+        if (interceptionActive || BeatmapAccelDownloadRuntime.Downloader == null || Parent is not Drawable root)
             return;
 
-        seenDrawables.Clear();
-        drawableScanStack.Clear();
-        drawableScanStack.Push(root);
-
-        while (drawableScanStack.Count > 0)
-        {
-            Drawable current = drawableScanStack.Pop();
-            inspectDrawable(current, seenDrawables);
-
-            if (current is not CompositeDrawable composite || internalChildrenProperty?.GetValue(composite) is not IEnumerable children)
-                continue;
-
-            foreach (object? child in children)
-            {
-                if (child is Drawable drawable)
-                    drawableScanStack.Push(drawable);
-            }
-        }
-
-        cleanupStaleState(seenDrawables);
+        interceptionActive = true;
+        attachSubtree(root);
     }
 
-    private void inspectDrawable(Drawable drawable, HashSet<object> seen)
+    private void endInterception()
+    {
+        interceptionActive = false;
+
+        foreach (CompositeObserver observer in compositeObservers.Values)
+            observer.Dispose();
+
+        compositeObservers.Clear();
+        restorePatchedState();
+    }
+
+    private void attachSubtree(Drawable root)
+    {
+        var stack = new Stack<Drawable>();
+        stack.Push(root);
+
+        while (stack.Count > 0)
+        {
+            Drawable current = stack.Pop();
+            inspectDrawable(current);
+
+            if (current is not CompositeDrawable composite)
+                continue;
+
+            ensureCompositeObserver(composite);
+            pushChildren(composite, stack);
+        }
+    }
+
+    private void detachSubtree(Drawable root)
+    {
+        var stack = new Stack<Drawable>();
+        stack.Push(root);
+
+        while (stack.Count > 0)
+        {
+            Drawable current = stack.Pop();
+
+            if (current is CompositeDrawable composite)
+            {
+                removeCompositeObserver(composite);
+                pushChildren(composite, stack);
+            }
+
+            cleanupDrawable(current);
+        }
+    }
+
+    private void onChildBecameAlive(Drawable child)
+    {
+        if (!interceptionActive)
+            return;
+
+        attachSubtree(child);
+    }
+
+    private void onChildDied(Drawable child)
+        => detachSubtree(child);
+
+    private void ensureCompositeObserver(CompositeDrawable composite)
+    {
+        if (compositeObservers.ContainsKey(composite))
+            return;
+
+        compositeObservers[composite] = new CompositeObserver(composite, onChildBecameAlive, onChildDied);
+    }
+
+    private void removeCompositeObserver(CompositeDrawable composite)
+    {
+        if (!compositeObservers.Remove(composite, out CompositeObserver? observer))
+            return;
+
+        observer.Dispose();
+    }
+
+    private static void pushChildren(CompositeDrawable composite, Stack<Drawable> stack)
+    {
+        if (internalChildrenProperty?.GetValue(composite) is not IEnumerable children)
+            return;
+
+        foreach (object? child in children)
+        {
+            if (child is Drawable drawable)
+                stack.Push(drawable);
+        }
+    }
+
+    private void inspectDrawable(Drawable drawable)
     {
         switch (drawable)
         {
             case HeaderDownloadButton headerDownloadButton:
-                patchHeaderDownloadButton(headerDownloadButton, seen);
+                patchHeaderDownloadButton(headerDownloadButton);
                 break;
 
             case BeatmapDownloadButton beatmapDownloadButton:
-                patchBeatmapDownloadButton(beatmapDownloadButton, seen);
+                patchBeatmapDownloadButton(beatmapDownloadButton);
                 break;
 
             case DownloadButton downloadButton:
-                patchCardDownloadButton(downloadButton, seen);
+                patchCardDownloadButton(downloadButton);
                 break;
 
             case BeatmapCard beatmapCard:
-                patchBeatmapCard(beatmapCard, seen);
+                patchBeatmapCard(beatmapCard);
                 break;
 
             case BeatmapDownloadTracker tracker when tracker is not BeatmapAccelBeatmapDownloadTracker:
-                seen.Add(tracker);
                 ensureTrackerBridge(tracker);
                 break;
 
             case SoloSpectatorScreen soloSpectatorScreen:
-                seen.Add(soloSpectatorScreen);
                 disableDownloaderMember(soloSpectatorScreen, "beatmapDownloader");
                 handleSoloSpectatorAutomaticDownload(soloSpectatorScreen);
                 break;
 
             case DailyChallengeIntro dailyChallengeIntro:
-                seen.Add(dailyChallengeIntro);
                 handleDailyChallengeAutomaticDownload(dailyChallengeIntro);
                 break;
 
             case ScreenMatchmaking matchmakingScreen:
-                seen.Add(matchmakingScreen);
                 disableDownloaderMember(matchmakingScreen, "beatmapDownloader");
                 handleMatchmakingAutomaticDownload(matchmakingScreen);
                 break;
 
             case MultiplayerSpectateButton multiplayerSpectateButton:
-                seen.Add(multiplayerSpectateButton);
                 disableDownloaderMember(multiplayerSpectateButton, "beatmapDownloader");
                 handleMultiplayerSpectateAutomaticDownload(multiplayerSpectateButton);
                 break;
 
             case MissingBeatmapNotification missingBeatmapNotification:
-                seen.Add(missingBeatmapNotification);
                 disableDownloaderMember(missingBeatmapNotification, "beatmapDownloader");
                 handleMissingBeatmapNotification(missingBeatmapNotification);
                 break;
 
             case PanelUpdateBeatmapButton panelUpdateBeatmapButton:
-                patchPanelUpdateBeatmapButton(panelUpdateBeatmapButton, seen);
+                patchPanelUpdateBeatmapButton(panelUpdateBeatmapButton);
                 break;
         }
 
         if (isTypeOrSubclass(drawable, ranked_play_screen_type_name))
         {
-            seen.Add(drawable);
             disableDownloaderMember(drawable, "beatmapDownloader");
             handleRankedPlayAutomaticDownload(drawable);
         }
     }
 
-    private void patchHeaderDownloadButton(HeaderDownloadButton headerDownloadButton, HashSet<object> seen)
+    private void cleanupDrawable(Drawable drawable)
+    {
+        switch (drawable)
+        {
+            case HeaderDownloadButton headerDownloadButton:
+                restoreActionPatch(getFieldValue<HeaderButton>(headerDownloadButton, "button"));
+                break;
+
+            case BeatmapDownloadButton beatmapDownloadButton:
+                restoreActionPatch(getFieldValue<UiDownloadButton>(beatmapDownloadButton, "button"));
+                break;
+
+            case DownloadButton downloadButton:
+                restoreActionPatch(downloadButton);
+                break;
+
+            case BeatmapCard beatmapCard:
+                restoreActionPatch(beatmapCard);
+                break;
+
+            case BeatmapDownloadTracker tracker when tracker is not BeatmapAccelBeatmapDownloadTracker:
+                if (trackerBridges.Remove(tracker, out TrackerBridge? bridge))
+                    bridge.Dispose();
+
+                break;
+
+            case SoloSpectatorScreen soloSpectatorScreen:
+                restoreMemberPatch(soloSpectatorScreen);
+                automaticDownloadAttempts.Remove(soloSpectatorScreen);
+                break;
+
+            case DailyChallengeIntro dailyChallengeIntro:
+                automaticDownloadAttempts.Remove(dailyChallengeIntro);
+                break;
+
+            case ScreenMatchmaking matchmakingScreen:
+                restoreMemberPatch(matchmakingScreen);
+                automaticDownloadAttempts.Remove(matchmakingScreen);
+                break;
+
+            case MultiplayerSpectateButton multiplayerSpectateButton:
+                restoreMemberPatch(multiplayerSpectateButton);
+                automaticDownloadAttempts.Remove(multiplayerSpectateButton);
+                break;
+
+            case MissingBeatmapNotification missingBeatmapNotification:
+                restoreMemberPatch(missingBeatmapNotification);
+                automaticDownloadAttempts.Remove(missingBeatmapNotification);
+                break;
+
+            case PanelUpdateBeatmapButton panelUpdateBeatmapButton:
+                restoreActionPatch(panelUpdateBeatmapButton);
+                break;
+        }
+
+        if (isTypeOrSubclass(drawable, ranked_play_screen_type_name))
+        {
+            restoreMemberPatch(drawable);
+            automaticDownloadAttempts.Remove(drawable);
+        }
+    }
+
+    private void patchHeaderDownloadButton(HeaderDownloadButton headerDownloadButton)
     {
         HeaderButton? button = getFieldValue<HeaderButton>(headerDownloadButton, "button");
         BeatmapDownloadTracker? tracker = getFieldValue<BeatmapDownloadTracker>(headerDownloadButton, "downloadTracker");
@@ -272,8 +383,6 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 
         if (button == null || tracker == null || beatmapSet == null || noVideo == null)
             return;
-
-        seen.Add(button);
 
         if (!actionPatches.ContainsKey(button))
             actionPatches[button] = new ActionPatch(button, button.Action);
@@ -290,7 +399,7 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
         };
     }
 
-    private void patchBeatmapDownloadButton(BeatmapDownloadButton beatmapDownloadButton, HashSet<object> seen)
+    private void patchBeatmapDownloadButton(BeatmapDownloadButton beatmapDownloadButton)
     {
         UiDownloadButton? button = getFieldValue<UiDownloadButton>(beatmapDownloadButton, "button");
         BeatmapDownloadTracker? tracker = getFieldValue<BeatmapDownloadTracker>(beatmapDownloadButton, "DownloadTracker");
@@ -299,8 +408,6 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 
         if (button == null || tracker == null || beatmapSet == null || noVideoSetting == null)
             return;
-
-        seen.Add(button);
 
         if (!actionPatches.ContainsKey(button))
             actionPatches[button] = new ActionPatch(button, button.Action);
@@ -317,15 +424,13 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
         };
     }
 
-    private void patchCardDownloadButton(DownloadButton downloadButton, HashSet<object> seen)
+    private void patchCardDownloadButton(DownloadButton downloadButton)
     {
         APIBeatmapSet? beatmapSet = getFieldValue<APIBeatmapSet>(downloadButton, "beatmapSet");
         Bindable<bool>? preferNoVideo = getFieldValue<Bindable<bool>>(downloadButton, "preferNoVideo");
 
         if (beatmapSet == null || preferNoVideo == null)
             return;
-
-        seen.Add(downloadButton);
 
         if (!actionPatches.ContainsKey(downloadButton))
             actionPatches[downloadButton] = new ActionPatch(downloadButton, downloadButton.Action);
@@ -339,10 +444,8 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
         };
     }
 
-    private void patchBeatmapCard(BeatmapCard beatmapCard, HashSet<object> seen)
+    private void patchBeatmapCard(BeatmapCard beatmapCard)
     {
-        seen.Add(beatmapCard);
-
         if (!actionPatches.ContainsKey(beatmapCard))
             actionPatches[beatmapCard] = new ActionPatch(beatmapCard, beatmapCard.Action);
 
@@ -376,10 +479,8 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
         };
     }
 
-    private void patchPanelUpdateBeatmapButton(PanelUpdateBeatmapButton panelUpdateBeatmapButton, HashSet<object> seen)
+    private void patchPanelUpdateBeatmapButton(PanelUpdateBeatmapButton panelUpdateBeatmapButton)
     {
-        seen.Add(panelUpdateBeatmapButton);
-
         if (!actionPatches.ContainsKey(panelUpdateBeatmapButton))
             actionPatches[panelUpdateBeatmapButton] = new ActionPatch(panelUpdateBeatmapButton, panelUpdateBeatmapButton.Action);
 
@@ -628,38 +729,6 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
             automaticDownloadAttempts[owner] = beatmapSetId;
     }
 
-    private void cleanupStaleState(HashSet<object> seen)
-    {
-        collectStaleKeys(actionPatches.Keys, seen);
-
-        foreach (object key in staleKeys)
-        {
-            actionPatches[key].Restore();
-            actionPatches.Remove(key);
-        }
-
-        collectStaleKeys(downloaderMemberPatches.Keys, seen);
-
-        foreach (object key in staleKeys)
-        {
-            restoreMemberPatch(downloaderMemberPatches[key]);
-            downloaderMemberPatches.Remove(key);
-        }
-
-        collectStaleKeys(trackerBridges.Keys, seen);
-
-        foreach (object key in staleKeys)
-        {
-            trackerBridges[(BeatmapDownloadTracker)key].Dispose();
-            trackerBridges.Remove((BeatmapDownloadTracker)key);
-        }
-
-        collectStaleKeys(automaticDownloadAttempts.Keys, seen);
-
-        foreach (object key in staleKeys)
-            automaticDownloadAttempts.Remove(key);
-    }
-
     private void restorePatchedState()
     {
         foreach (ActionPatch patch in actionPatches.Values)
@@ -677,6 +746,22 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 
         trackerBridges.Clear();
         automaticDownloadAttempts.Clear();
+    }
+
+    private void restoreActionPatch(object? key)
+    {
+        if (key == null || !actionPatches.Remove(key, out ActionPatch? patch))
+            return;
+
+        patch.Restore();
+    }
+
+    private void restoreMemberPatch(object owner)
+    {
+        if (!downloaderMemberPatches.Remove(owner, out MemberPatch? patch))
+            return;
+
+        restoreMemberPatch(patch);
     }
 
     private void restoreMemberPatch(MemberPatch patch)
@@ -700,6 +785,10 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 
         restoreOriginalDownloaderNotifications();
         BeatmapAccelDownloadRuntime.Shutdown();
+        foreach (CompositeObserver observer in compositeObservers.Values)
+            observer.Dispose();
+
+        compositeObservers.Clear();
         restorePatchedState();
     }
 
@@ -795,18 +884,54 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
         return false;
     }
 
-    private void collectStaleKeys(IEnumerable<object> keys, HashSet<object> seen)
-    {
-        staleKeys.Clear();
+    private sealed record MemberPatch(object Owner, MemberInfo Member, object OriginalValue);
 
-        foreach (object key in keys)
+    private sealed class CompositeObserver : IDisposable
+    {
+        private readonly CompositeDrawable composite;
+        private readonly Delegate? childBecameAliveHandler;
+        private readonly Delegate? childDiedHandler;
+
+        public CompositeObserver(CompositeDrawable composite, Action<Drawable> childBecameAlive, Action<Drawable> childDied)
         {
-            if (!seen.Contains(key))
-                staleKeys.Add(key);
+            this.composite = composite;
+            childBecameAliveHandler = createHandler(childBecameAliveEvent, childBecameAlive);
+            childDiedHandler = createHandler(childDiedEvent, childDied);
+
+            addHandler(childBecameAliveEvent, childBecameAliveHandler);
+            addHandler(childDiedEvent, childDiedHandler);
+        }
+
+        public void Dispose()
+        {
+            removeHandler(childBecameAliveEvent, childBecameAliveHandler);
+            removeHandler(childDiedEvent, childDiedHandler);
+        }
+
+        private Delegate? createHandler(EventInfo? eventInfo, Action<Drawable> callback)
+        {
+            if (eventInfo?.EventHandlerType == null)
+                return null;
+
+            return Delegate.CreateDelegate(eventInfo.EventHandlerType, callback.Target, callback.Method, false);
+        }
+
+        private void addHandler(EventInfo? eventInfo, Delegate? handler)
+        {
+            if (eventInfo?.GetAddMethod(true) == null || handler == null)
+                return;
+
+            eventInfo.GetAddMethod(true)!.Invoke(composite, new object?[] { handler });
+        }
+
+        private void removeHandler(EventInfo? eventInfo, Delegate? handler)
+        {
+            if (eventInfo?.GetRemoveMethod(true) == null || handler == null)
+                return;
+
+            eventInfo.GetRemoveMethod(true)!.Invoke(composite, new object?[] { handler });
         }
     }
-
-    private sealed record MemberPatch(object Owner, MemberInfo Member, object OriginalValue);
 
     private sealed class ActionPatch
     {
