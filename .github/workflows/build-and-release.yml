@@ -1,0 +1,84 @@
+name: Build And Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout BeatmapAccel
+        uses: actions/checkout@v4
+        with:
+          path: osu-beatmap-accel
+          fetch-depth: 0
+
+      - name: Checkout osu!
+        uses: actions/checkout@v4
+        with:
+          repository: ppy/osu
+          path: osu
+          fetch-depth: 1
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore and build
+        shell: pwsh
+        run: >
+          dotnet build
+          "$env:GITHUB_WORKSPACE\osu-beatmap-accel\osu.Game.Rulesets.BeatmapAccel\osu.Game.Rulesets.BeatmapAccel.csproj"
+          -c Release
+          --nologo
+
+      - name: Package DLL
+        id: package
+        shell: pwsh
+        run: |
+          $dllPath = "$env:GITHUB_WORKSPACE\osu-beatmap-accel\osu.Game.Rulesets.BeatmapAccel\bin\Release\net8.0\osu.Game.Rulesets.BeatmapAccel.dll"
+          if (!(Test-Path $dllPath)) {
+            throw "DLL not found: $dllPath"
+          }
+
+          $packageRoot = "$env:RUNNER_TEMP\beatmapaccel-package"
+          $zipPath = "$env:RUNNER_TEMP\osu.Game.Rulesets.BeatmapAccel.zip"
+
+          if (Test-Path $packageRoot) {
+            Remove-Item $packageRoot -Recurse -Force
+          }
+
+          if (Test-Path $zipPath) {
+            Remove-Item $zipPath -Force
+          }
+
+          New-Item -ItemType Directory -Path $packageRoot | Out-Null
+          Copy-Item $dllPath -Destination "$packageRoot\osu.Game.Rulesets.BeatmapAccel.dll"
+          Compress-Archive -Path "$packageRoot\osu.Game.Rulesets.BeatmapAccel.dll" -DestinationPath $zipPath -CompressionLevel Optimal
+
+          "zip_path=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Publish rolling release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: auto-build
+          name: Auto Build
+          prerelease: true
+          make_latest: false
+          generate_release_notes: false
+          overwrite_files: true
+          body: |
+            Automated build from `${{ github.sha }}`.
+
+            Source branch: `${{ github.ref_name }}`
+          files: |
+            ${{ steps.package.outputs.zip_path }}
