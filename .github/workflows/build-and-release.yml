@@ -67,16 +67,40 @@ jobs:
 
           "zip_path=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
+      - name: Prepare release metadata
+        id: release_meta
+        shell: pwsh
+        run: |
+          $buildTimeUtc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss 'UTC'")
+          "build_time_utc=$buildTimeUtc" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Recreate rolling release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view auto-build *> $null
+
+          if ($LASTEXITCODE -eq 0) {
+            gh release delete auto-build --cleanup-tag --yes
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to delete existing auto-build release."
+            }
+          }
+
       - name: Publish rolling release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: auto-build
-          name: Auto Build
+          name: Auto Build (${{ steps.release_meta.outputs.build_time_utc }})
           prerelease: false
           make_latest: true
           generate_release_notes: false
           overwrite_files: true
           body: |
+            Build time: `${{ steps.release_meta.outputs.build_time_utc }}`
+
             Automated build from `${{ github.sha }}`.
 
             Source branch: `${{ github.ref_name }}`
