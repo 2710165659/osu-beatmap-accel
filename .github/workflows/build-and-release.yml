@@ -80,13 +80,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view auto-build *> $null
+          $releaseExists = $LASTEXITCODE -eq 0
+          $global:LASTEXITCODE = 0
 
-          if ($LASTEXITCODE -eq 0) {
+          if ($releaseExists) {
             gh release delete auto-build --cleanup-tag --yes
 
             if ($LASTEXITCODE -ne 0) {
               throw "Failed to delete existing auto-build release."
             }
+
+            $global:LASTEXITCODE = 0
           }
 
       - name: Publish rolling release
