@@ -1,5 +1,6 @@
 using osu.Game.Overlays;
 using osu.Game.Overlays.Notifications;
+using osu.Game.Rulesets.BeatmapAccel.Compatibility;
 using osu.Game.Rulesets.BeatmapAccel.Configuration;
 using System;
 using System.Collections.Concurrent;
@@ -162,6 +163,7 @@ public static class CloudflareSpeedTestManager
     };
 
     private static readonly SemaphoreSlim switchLock = new(1, 1);
+    private static readonly IBeatmapAccelRuntimeStrategy runtime = BeatmapAccelRuntime.Current;
 
     private static int startupSwitchTriggered;
     private static int failureRecoveryTriggered;
@@ -186,6 +188,7 @@ public static class CloudflareSpeedTestManager
 
         _ = Task.Run(async () =>
         {
+            BeatmapAccelLogging.Log($"Startup speed test running on {runtime.Name} runtime strategy.");
             SpeedTestSelectionResult result = await SwitchToFastestIpAsync(SpeedTestTrigger.Startup).ConfigureAwait(false);
 
             if (!result.Success)
@@ -212,6 +215,7 @@ public static class CloudflareSpeedTestManager
         {
             try
             {
+                BeatmapAccelLogging.Log($"Failure recovery speed test running on {runtime.Name} runtime strategy.");
                 SpeedTestSelectionResult result = await SwitchToFastestIpAsync(SpeedTestTrigger.DownloadFailure).ConfigureAwait(false);
 
                 if (result.Success)
@@ -372,7 +376,7 @@ public static class CloudflareSpeedTestManager
 
         while (offsets.Count < sampleCount && offsets.Count < (int)(maxExclusive - minOffset))
         {
-            long nextOffset = Random.Shared.NextInt64((long)minOffset, (long)maxExclusive);
+            long nextOffset = runtime.NextInt64((long)minOffset, (long)maxExclusive);
             if (!offsets.Add((ulong)nextOffset))
                 continue;
 
@@ -403,11 +407,7 @@ public static class CloudflareSpeedTestManager
     {
         var results = new ConcurrentBag<TcpProbeResult>();
 
-        await Parallel.ForEachAsync(candidates, new ParallelOptions
-        {
-            CancellationToken = cancellationToken,
-            MaxDegreeOfParallelism = tcp_probe_concurrency
-        }, async (candidate, token) =>
+        await runtime.ForEachAsync(candidates, tcp_probe_concurrency, cancellationToken, async (candidate, token) =>
         {
             TcpProbeResult result = await probeTcpAsync(candidate, token).ConfigureAwait(false);
             if (result.Success)
@@ -434,7 +434,7 @@ public static class CloudflareSpeedTestManager
                 NoDelay = true
             };
 
-            await socket.ConnectAsync(address, 443, timeout.Token).ConfigureAwait(false);
+            await runtime.ConnectSocketAsync(socket, address, 443, timeout.Token).ConfigureAwait(false);
             stopwatch.Stop();
             return new TcpProbeResult(candidate, true, stopwatch.Elapsed);
         }
@@ -449,11 +449,7 @@ public static class CloudflareSpeedTestManager
     {
         var results = new ConcurrentBag<HttpProbeResult>();
 
-        await Parallel.ForEachAsync(finalists, new ParallelOptions
-        {
-            CancellationToken = cancellationToken,
-            MaxDegreeOfParallelism = http_probe_concurrency
-        }, async (candidate, token) =>
+        await runtime.ForEachAsync(finalists, http_probe_concurrency, cancellationToken, async (candidate, token) =>
         {
             HttpProbeResult? result = await probeHttpAsync(candidate, token).ConfigureAwait(false);
             if (result != null)
@@ -471,32 +467,18 @@ public static class CloudflareSpeedTestManager
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(http_probe_timeout);
 
-        using var handler = new SocketsHttpHandler
-        {
-            AllowAutoRedirect = false,
-            AutomaticDecompression = DecompressionMethods.None,
-            ConnectTimeout = tcp_probe_timeout,
-            PooledConnectionLifetime = TimeSpan.Zero,
-            PooledConnectionIdleTimeout = TimeSpan.Zero,
-            ConnectCallback = async (context, token) =>
-            {
-                var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp)
-                {
-                    NoDelay = true
-                };
+        using var handler = runtime.CreatePreferredIpHttpHandler(new PreferredIpHttpHandlerOptions(
+            address,
+            AllowAutoRedirect: false,
+            AutomaticDecompression: DecompressionMethods.None,
+            ConnectTimeout: tcp_probe_timeout,
+            PooledConnectionLifetime: TimeSpan.Zero,
+            PooledConnectionIdleTimeout: TimeSpan.Zero));
 
-                await socket.ConnectAsync(address, context.DnsEndPoint.Port, token).ConfigureAwait(false);
-                return new NetworkStream(socket, ownsSocket: true);
-            }
-        };
-
-        using var client = new HttpClient(handler)
-        {
-            Timeout = Timeout.InfiniteTimeSpan
-        };
+        using var client = runtime.CreateHttpClient(handler);
 
         using var request = new HttpRequestMessage(HttpMethod.Get, $"https://{probe_host}/");
-        request.Headers.TryAddWithoutValidation("User-Agent", "BeatmapAccel-SpeedTest");
+        runtime.SetRequestHeader(request, "User-Agent", "BeatmapAccel-SpeedTest");
 
         Stopwatch stopwatch = Stopwatch.StartNew();
 
@@ -587,21 +569,10 @@ public static class CloudflareSpeedTestManager
     }
 
     private static string formatIpv4(uint value)
-        => new IPAddress(new[]
-        {
-            (byte)(value >> 24),
-            (byte)(value >> 16),
-            (byte)(value >> 8),
-            (byte)value
-        }).ToString();
+        => runtime.FormatIpv4(value);
 
     private static string formatIpv6(BigInteger value)
-    {
-        byte[] littleEndian = value.ToByteArray();
-        Array.Resize(ref littleEndian, 16);
-        Array.Reverse(littleEndian);
-        return new IPAddress(littleEndian).ToString();
-    }
+        => runtime.FormatIpv6(value);
 
     private static BigInteger randomBigInteger(BigInteger exclusiveMax)
     {
@@ -610,7 +581,7 @@ public static class CloudflareSpeedTestManager
 
         do
         {
-            Random.Shared.NextBytes(bytes);
+            runtime.NextBytes(bytes);
             bytes[^1] &= 0x7F;
             result = new BigInteger(bytes);
         }

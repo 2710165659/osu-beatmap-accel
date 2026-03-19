@@ -41,12 +41,15 @@ namespace osu.Game.Rulesets.BeatmapAccel.Features.Download;
 
 public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 {
-    private const double scan_interval = 1000;
+    private const double scan_interval = 250;
     private const string ranked_play_screen_type_name = "osu.Game.Screens.OnlinePlay.Matchmaking.RankedPlay.RankedPlayScreen";
 
     private static readonly BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
     private static readonly PropertyInfo? internalChildrenProperty = typeof(CompositeDrawable).GetProperty("InternalChildren", flags);
     private static readonly FieldInfo? noVideoField = typeof(DownloadBeatmapSetRequest).GetField("noVideo", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly Dictionary<(Type Type, string Name), MemberInfo?> memberCache = new();
+    private static readonly Dictionary<(Type Type, string Name), FieldInfo?> fieldCache = new();
+    private static readonly Dictionary<Type, bool> rankedPlayTypeCache = new();
 
     [Resolved(canBeNull: true)]
     private BeatmapManager? beatmapManager { get; set; }
@@ -68,11 +71,16 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 
     private IBindable<bool>? interceptAllDownloads;
     private double lastScanTime;
+    private MemberInfo? originalDownloaderNotificationMember;
+    private Action<Notification>? originalDownloaderNotificationTarget;
 
     private readonly Dictionary<object, ActionPatch> actionPatches = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<object, MemberPatch> downloaderMemberPatches = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<BeatmapDownloadTracker, TrackerBridge> trackerBridges = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<object, int> automaticDownloadAttempts = new(ReferenceEqualityComparer.Instance);
+    private readonly HashSet<object> seenDrawables = new(ReferenceEqualityComparer.Instance);
+    private readonly Stack<Drawable> drawableScanStack = new();
+    private readonly List<object> staleKeys = new();
 
     [BackgroundDependencyLoader]
     private void load()
@@ -86,7 +94,10 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
         BeatmapAccelDownloadRuntime.EnsureInitialized(beatmapManager, apiProvider, notifications == null ? null : notifications.Post);
 
         if (originalDownloader != null)
+        {
             originalDownloader.DownloadBegan += onOriginalDownloadBegan;
+            hookOriginalDownloaderNotifications();
+        }
 
         CloudflareSpeedTestManager.ScheduleToMainThread ??= action => Schedule(action);
         CloudflareSpeedTestManager.BeginStartupSpeedTest();
@@ -125,19 +136,50 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
             restorePatchedState();
     }
 
+    private void hookOriginalDownloaderNotifications()
+    {
+        if (originalDownloader == null)
+            return;
+
+        originalDownloaderNotificationMember ??= getMember(originalDownloader.GetType(), "PostNotification");
+
+        if (originalDownloaderNotificationMember == null)
+            return;
+
+        originalDownloaderNotificationTarget = getMemberValue(originalDownloaderNotificationMember, originalDownloader) as Action<Notification>;
+
+        setMemberValue(originalDownloaderNotificationMember, originalDownloader, (Action<Notification>)filterOriginalDownloaderNotification);
+    }
+
+    private void restoreOriginalDownloaderNotifications()
+    {
+        if (originalDownloader == null || originalDownloaderNotificationMember == null)
+            return;
+
+        setMemberValue(originalDownloaderNotificationMember, originalDownloader, originalDownloaderNotificationTarget!);
+    }
+
+    private void filterOriginalDownloaderNotification(Notification notification)
+    {
+        if (interceptAllDownloads?.Value == true)
+            return;
+
+        originalDownloaderNotificationTarget?.Invoke(notification);
+    }
+
     private void scanAndPatch()
     {
         if (Parent is not Drawable root)
             return;
 
-        var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
-        var stack = new Stack<Drawable>();
-        stack.Push(root);
+        seenDrawables.Clear();
+        drawableScanStack.Clear();
+        drawableScanStack.Push(root);
 
-        while (stack.Count > 0)
+        while (drawableScanStack.Count > 0)
         {
-            Drawable current = stack.Pop();
-            inspectDrawable(current, seen);
+            Drawable current = drawableScanStack.Pop();
+            inspectDrawable(current, seenDrawables);
 
             if (current is not CompositeDrawable composite || internalChildrenProperty?.GetValue(composite) is not IEnumerable children)
                 continue;
@@ -145,11 +187,11 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
             foreach (object? child in children)
             {
                 if (child is Drawable drawable)
-                    stack.Push(drawable);
+                    drawableScanStack.Push(drawable);
             }
         }
 
-        cleanupStaleState(seen);
+        cleanupStaleState(seenDrawables);
     }
 
     private void inspectDrawable(Drawable drawable, HashSet<object> seen)
@@ -586,38 +628,34 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 
     private void cleanupStaleState(HashSet<object> seen)
     {
-        foreach (var pair in actionPatches.ToArray())
-        {
-            if (seen.Contains(pair.Key))
-                continue;
+        collectStaleKeys(actionPatches.Keys, seen);
 
-            pair.Value.Restore();
-            actionPatches.Remove(pair.Key);
+        foreach (object key in staleKeys)
+        {
+            actionPatches[key].Restore();
+            actionPatches.Remove(key);
         }
 
-        foreach (var pair in downloaderMemberPatches.ToArray())
-        {
-            if (seen.Contains(pair.Key))
-                continue;
+        collectStaleKeys(downloaderMemberPatches.Keys, seen);
 
-            restoreMemberPatch(pair.Value);
-            downloaderMemberPatches.Remove(pair.Key);
+        foreach (object key in staleKeys)
+        {
+            restoreMemberPatch(downloaderMemberPatches[key]);
+            downloaderMemberPatches.Remove(key);
         }
 
-        foreach (var pair in trackerBridges.ToArray())
-        {
-            if (seen.Contains(pair.Key))
-                continue;
+        collectStaleKeys(trackerBridges.Keys, seen);
 
-            pair.Value.Dispose();
-            trackerBridges.Remove(pair.Key);
+        foreach (object key in staleKeys)
+        {
+            trackerBridges[(BeatmapDownloadTracker)key].Dispose();
+            trackerBridges.Remove((BeatmapDownloadTracker)key);
         }
 
-        foreach (object owner in automaticDownloadAttempts.Keys.ToArray())
-        {
-            if (!seen.Contains(owner))
-                automaticDownloadAttempts.Remove(owner);
-        }
+        collectStaleKeys(automaticDownloadAttempts.Keys, seen);
+
+        foreach (object key in staleKeys)
+            automaticDownloadAttempts.Remove(key);
     }
 
     private void restorePatchedState()
@@ -658,25 +696,32 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
         if (originalDownloader != null)
             originalDownloader.DownloadBegan -= onOriginalDownloadBegan;
 
+        restoreOriginalDownloaderNotifications();
         BeatmapAccelDownloadRuntime.Shutdown();
         restorePatchedState();
     }
 
     private static MemberInfo? getMember(Type type, string memberName)
     {
+        var cacheKey = (type, memberName);
+
+        if (memberCache.TryGetValue(cacheKey, out MemberInfo? cachedMember))
+            return cachedMember;
+
         for (Type? current = type; current != null; current = current.BaseType)
         {
             FieldInfo? field = current.GetField(memberName, flags);
 
             if (field != null)
-                return field;
+                return memberCache[cacheKey] = field;
 
             PropertyInfo? property = current.GetProperty(memberName, flags);
 
             if (property != null)
-                return property;
+                return memberCache[cacheKey] = property;
         }
 
+        memberCache[cacheKey] = null;
         return null;
     }
 
@@ -704,17 +749,22 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 
     private static T? getFieldValue<T>(object owner, string fieldName)
     {
-        for (Type? current = owner.GetType(); current != null; current = current.BaseType)
+        var cacheKey = (owner.GetType(), fieldName);
+
+        if (!fieldCache.TryGetValue(cacheKey, out FieldInfo? field))
         {
-            FieldInfo? field = current.GetField(fieldName, flags);
+            for (Type? current = owner.GetType(); current != null; current = current.BaseType)
+            {
+                field = current.GetField(fieldName, flags);
 
-            if (field == null)
-                continue;
+                if (field != null)
+                    break;
+            }
 
-            return (T?)field.GetValue(owner);
+            fieldCache[cacheKey] = field;
         }
 
-        return default;
+        return field == null ? default : (T?)field.GetValue(owner);
     }
 
     private static T? getMemberValue<T>(object owner, string memberName)
@@ -725,13 +775,33 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 
     private static bool isTypeOrSubclass(object owner, string fullTypeName)
     {
-        for (Type? current = owner.GetType(); current != null; current = current.BaseType)
+        Type ownerType = owner.GetType();
+
+        if (rankedPlayTypeCache.TryGetValue(ownerType, out bool cachedResult))
+            return cachedResult;
+
+        for (Type? current = ownerType; current != null; current = current.BaseType)
         {
             if (current.FullName == fullTypeName)
+            {
+                rankedPlayTypeCache[ownerType] = true;
                 return true;
+            }
         }
 
+        rankedPlayTypeCache[ownerType] = false;
         return false;
+    }
+
+    private void collectStaleKeys(IEnumerable<object> keys, HashSet<object> seen)
+    {
+        staleKeys.Clear();
+
+        foreach (object key in keys)
+        {
+            if (!seen.Contains(key))
+                staleKeys.Add(key);
+        }
     }
 
     private sealed record MemberPatch(object Owner, MemberInfo Member, object OriginalValue);

@@ -25,6 +25,9 @@ public static class InjectorBootstrapper
 
                 game.Add(new Download.PreviewTrackHandler());
                 BeatmapAccelLogging.Log("Injected proxy preview handler.");
+
+                game.Add(new RulesetSettingsRedirector());
+                BeatmapAccelLogging.Log("Injected ruleset settings redirector.");
             }
             catch (Exception e)
             {

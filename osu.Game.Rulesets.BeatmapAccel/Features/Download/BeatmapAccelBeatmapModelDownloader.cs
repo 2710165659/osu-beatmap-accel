@@ -14,11 +14,14 @@ using osu.Game.Database;
 using osu.Game.Extensions;
 using osu.Game.Online.API;
 using osu.Game.Overlays.Notifications;
+using osu.Game.Rulesets.BeatmapAccel.Compatibility;
 
 namespace osu.Game.Rulesets.BeatmapAccel.Features.Download;
 
 public partial class BeatmapAccelBeatmapModelDownloader
 {
+    private static readonly IBeatmapAccelRuntimeStrategy runtime = BeatmapAccelRuntime.Current;
+
     public Action<Notification>? PostNotification { private get; set; }
 
     public event Action<ArchiveDownloadRequest<IBeatmapSetInfo>>? DownloadBegan;
@@ -227,7 +230,7 @@ public partial class BeatmapAccelBeatmapModelDownloader
 
             string tempFile = Path.GetTempFileName();
             targetFilePath = Path.ChangeExtension(tempFile, ".osz");
-            File.Move(tempFile, targetFilePath, overwrite: true);
+            runtime.MoveFileOverwrite(tempFile, targetFilePath);
         }
 
         public void Start()
@@ -255,41 +258,38 @@ public partial class BeatmapAccelBeatmapModelDownloader
             try
             {
                 using var handler = createHandler();
-                using var client = new HttpClient(handler)
-                {
-                    Timeout = Timeout.InfiniteTimeSpan,
-                };
+                using var client = runtime.CreateHttpClient(handler);
                 using var request = new HttpRequestMessage(HttpMethod.Get, Uri);
 
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", api.AccessToken);
-                request.Headers.UserAgent.ParseAdd("osu!");
-                request.Headers.AcceptLanguage.ParseAdd(api.Language.ToCultureCode());
-                request.Headers.TryAddWithoutValidation("x-api-version", api.APIVersion.ToString());
+                runtime.SetRequestHeader(request, "User-Agent", "osu!");
+                runtime.SetRequestHeader(request, "Accept-Language", api.Language.ToCultureCode());
+                runtime.SetRequestHeader(request, "x-api-version", api.APIVersion.ToString());
 
                 using HttpResponseMessage response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationSource.Token).ConfigureAwait(false);
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    string body = await response.Content.ReadAsStringAsync(cancellationSource.Token).ConfigureAwait(false);
+                    string body = await runtime.ReadHttpStringAsync(response.Content, cancellationSource.Token).ConfigureAwait(false);
                     throw new InvalidOperationException($"HTTP {(int)response.StatusCode} {response.ReasonPhrase} {body}");
                 }
 
                 long totalBytes = response.Content.Headers.ContentLength ?? -1;
                 long currentBytes = 0;
 
-                using Stream input = await response.Content.ReadAsStreamAsync(cancellationSource.Token).ConfigureAwait(false);
+                using Stream input = await runtime.ReadHttpStreamAsync(response.Content, cancellationSource.Token).ConfigureAwait(false);
                 await using FileStream output = new(targetFilePath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, useAsync: true);
 
                 byte[] buffer = new byte[81920];
 
                 while (true)
                 {
-                    int read = await input.ReadAsync(buffer, cancellationSource.Token).ConfigureAwait(false);
+                    int read = await runtime.ReadStreamAsync(input, buffer, 0, buffer.Length, cancellationSource.Token).ConfigureAwait(false);
 
                     if (read <= 0)
                         break;
 
-                    await output.WriteAsync(buffer.AsMemory(0, read), cancellationSource.Token).ConfigureAwait(false);
+                    await runtime.WriteStreamAsync(output, buffer, 0, read, cancellationSource.Token).ConfigureAwait(false);
                     currentBytes += read;
 
                     if (Interlocked.Exchange(ref firstProgressLogged, 1) == 0)
@@ -311,26 +311,11 @@ public partial class BeatmapAccelBeatmapModelDownloader
         }
 
         private SocketsHttpHandler createHandler()
-        {
-            var handler = new SocketsHttpHandler
-            {
-                AllowAutoRedirect = true,
-                AutomaticDecompression = DecompressionMethods.All,
-                ConnectTimeout = TimeSpan.FromSeconds(15),
-            };
-
-            if (!string.IsNullOrWhiteSpace(preferredIp) && IPAddress.TryParse(preferredIp, out IPAddress? ipAddress))
-            {
-                handler.ConnectCallback = async (context, cancellationToken) =>
-                {
-                    var socket = new Socket(ipAddress.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
-                    await socket.ConnectAsync(ipAddress, context.DnsEndPoint.Port, cancellationToken).ConfigureAwait(false);
-                    return new NetworkStream(socket, ownsSocket: true);
-                };
-            }
-
-            return handler;
-        }
+            => runtime.CreatePreferredIpHttpHandler(new PreferredIpHttpHandlerOptions(
+                !string.IsNullOrWhiteSpace(preferredIp) && IPAddress.TryParse(preferredIp, out IPAddress? ipAddress) ? ipAddress : null,
+                AllowAutoRedirect: true,
+                AutomaticDecompression: DecompressionMethods.All,
+                ConnectTimeout: TimeSpan.FromSeconds(15)));
 
         private void cleanupTargetFile()
         {

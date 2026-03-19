@@ -15,6 +15,8 @@ namespace osu.Game.Rulesets.BeatmapAccel.Features.Download;
 
 public partial class PreviewTrackHandler : AbstractHandler
 {
+    private const double preview_poll_interval = 100;
+
     private readonly Bindable<PreviewTrackManager.TrackManagerPreviewTrack?> previewTrack = new();
     private readonly object injectLock = new();
     private readonly IBindable<bool>? showPreviewOverlay = BeatmapAccelRulesetConfigManager.Instance?.GetBindable<bool>(BeatmapAccelSetting.ShowPreviewDownloadOverlay);
@@ -22,6 +24,8 @@ public partial class PreviewTrackHandler : AbstractHandler
     private FieldInfo? previewTrackFieldInfo;
     private int? currentBeatmapSetId;
     private BeatmapAccelDownloadOverlay? currentOverlay;
+    private double nextPreviewPollTime;
+    private PreviewTrackManager.TrackManagerPreviewTrack? lastPreviewTrack;
 
     [Resolved]
     private PreviewTrackManager previewTrackManager { get; set; } = null!;
@@ -49,9 +53,20 @@ public partial class PreviewTrackHandler : AbstractHandler
         if (previewTrackFieldInfo == null || DebugUtils.IsDebugBuild)
             return;
 
+        if (Time.Current < nextPreviewPollTime)
+            return;
+
+        nextPreviewPollTime = Time.Current + preview_poll_interval;
+
         try
         {
-            previewTrack.Value = (PreviewTrackManager.TrackManagerPreviewTrack?)previewTrackFieldInfo.GetValue(previewTrackManager);
+            var currentPreviewTrack = (PreviewTrackManager.TrackManagerPreviewTrack?)previewTrackFieldInfo.GetValue(previewTrackManager);
+
+            if (ReferenceEquals(lastPreviewTrack, currentPreviewTrack))
+                return;
+
+            lastPreviewTrack = currentPreviewTrack;
+            previewTrack.Value = currentPreviewTrack;
         }
         catch (Exception e)
         {
@@ -69,7 +84,8 @@ public partial class PreviewTrackHandler : AbstractHandler
             if (previewTrackFieldInfo == null)
                 return false;
 
-            previewTrack.Value = (PreviewTrackManager.TrackManagerPreviewTrack?)previewTrackFieldInfo.GetValue(previewTrackManager);
+            lastPreviewTrack = (PreviewTrackManager.TrackManagerPreviewTrack?)previewTrackFieldInfo.GetValue(previewTrackManager);
+            previewTrack.Value = lastPreviewTrack;
             return true;
         }
     }
