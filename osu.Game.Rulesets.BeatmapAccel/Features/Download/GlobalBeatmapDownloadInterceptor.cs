@@ -79,7 +79,9 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
     private readonly Dictionary<CompositeDrawable, CompositeObserver> compositeObservers = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<object, MemberPatch> downloaderMemberPatches = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<BeatmapDownloadTracker, TrackerBridge> trackerBridges = new(ReferenceEqualityComparer.Instance);
-    private readonly Dictionary<object, int> automaticDownloadAttempts = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<object, IDisposable> automaticDownloadBridges = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<object, int> automaticLookupAttempts = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<object, int> automaticSetDownloadAttempts = new(ReferenceEqualityComparer.Instance);
 
     [BackgroundDependencyLoader]
     private void load()
@@ -278,7 +280,8 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 
             case SoloSpectatorScreen soloSpectatorScreen:
                 disableDownloaderMember(soloSpectatorScreen, "beatmapDownloader");
-                handleSoloSpectatorAutomaticDownload(soloSpectatorScreen);
+                if (!ensureSoloSpectatorAutomaticDownloadBridge(soloSpectatorScreen))
+                    handleSoloSpectatorAutomaticDownload(soloSpectatorScreen);
                 break;
 
             case DailyChallengeIntro dailyChallengeIntro:
@@ -287,12 +290,14 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 
             case ScreenMatchmaking matchmakingScreen:
                 disableDownloaderMember(matchmakingScreen, "beatmapDownloader");
-                handleMatchmakingAutomaticDownload(matchmakingScreen);
+                if (!ensureMatchmakingAutomaticDownloadBridge(matchmakingScreen))
+                    handleMatchmakingAutomaticDownload(matchmakingScreen);
                 break;
 
             case MultiplayerSpectateButton multiplayerSpectateButton:
                 disableDownloaderMember(multiplayerSpectateButton, "beatmapDownloader");
-                handleMultiplayerSpectateAutomaticDownload(multiplayerSpectateButton);
+                if (!ensureMultiplayerSpectateAutomaticDownloadBridge(multiplayerSpectateButton))
+                    handleMultiplayerSpectateAutomaticDownload(multiplayerSpectateButton);
                 break;
 
             case MissingBeatmapNotification missingBeatmapNotification:
@@ -340,26 +345,26 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 
             case SoloSpectatorScreen soloSpectatorScreen:
                 restoreMemberPatch(soloSpectatorScreen);
-                automaticDownloadAttempts.Remove(soloSpectatorScreen);
+                removeAutomaticDownloadState(soloSpectatorScreen);
                 break;
 
             case DailyChallengeIntro dailyChallengeIntro:
-                automaticDownloadAttempts.Remove(dailyChallengeIntro);
+                removeAutomaticDownloadState(dailyChallengeIntro);
                 break;
 
             case ScreenMatchmaking matchmakingScreen:
                 restoreMemberPatch(matchmakingScreen);
-                automaticDownloadAttempts.Remove(matchmakingScreen);
+                removeAutomaticDownloadState(matchmakingScreen);
                 break;
 
             case MultiplayerSpectateButton multiplayerSpectateButton:
                 restoreMemberPatch(multiplayerSpectateButton);
-                automaticDownloadAttempts.Remove(multiplayerSpectateButton);
+                removeAutomaticDownloadState(multiplayerSpectateButton);
                 break;
 
             case MissingBeatmapNotification missingBeatmapNotification:
                 restoreMemberPatch(missingBeatmapNotification);
-                automaticDownloadAttempts.Remove(missingBeatmapNotification);
+                removeAutomaticDownloadState(missingBeatmapNotification);
                 break;
 
             case PanelUpdateBeatmapButton panelUpdateBeatmapButton:
@@ -370,7 +375,7 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
         if (isTypeOrSubclass(drawable, ranked_play_screen_type_name))
         {
             restoreMemberPatch(drawable);
-            automaticDownloadAttempts.Remove(drawable);
+            removeAutomaticDownloadState(drawable);
         }
     }
 
@@ -569,6 +574,25 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
         requestAutomaticDownload(screen, beatmapSet.OnlineID, beatmapSet, false);
     }
 
+    private bool ensureSoloSpectatorAutomaticDownloadBridge(SoloSpectatorScreen screen)
+    {
+        if (automaticDownloadBridges.ContainsKey(screen))
+            return true;
+
+        SettingsCheckbox? automaticDownload = getFieldValue<SettingsCheckbox>(screen, "automaticDownload");
+        Container? beatmapPanelContainer = getFieldValue<Container>(screen, "beatmapPanelContainer");
+
+        if (automaticDownload == null || beatmapPanelContainer == null)
+            return false;
+
+        automaticDownloadBridges[screen] = new SoloSpectatorAutomaticDownloadBridge(
+            beatmapPanelContainer,
+            automaticDownload.Current,
+            () => Scheduler.AddOnce(() => handleSoloSpectatorAutomaticDownload(screen)));
+
+        return true;
+    }
+
     private void handleDailyChallengeAutomaticDownload(DailyChallengeIntro intro)
     {
         if (osuConfig?.Get<bool>(OsuSetting.AutomaticallyDownloadMissingBeatmaps) != true)
@@ -593,6 +617,23 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
         queueLookupDownload(screen, client.Room.CurrentPlaylistItem.BeatmapID, osuConfig?.Get<bool>(OsuSetting.PreferNoVideo) == true);
     }
 
+    private bool ensureMatchmakingAutomaticDownloadBridge(ScreenMatchmaking screen)
+    {
+        if (automaticDownloadBridges.ContainsKey(screen))
+            return true;
+
+        MultiplayerClient? client = getMemberValue<MultiplayerClient>(screen, "client");
+
+        if (client == null)
+            return false;
+
+        automaticDownloadBridges[screen] = new MatchmakingAutomaticDownloadBridge(
+            client,
+            () => Scheduler.AddOnce(() => handleMatchmakingAutomaticDownload(screen)));
+
+        return true;
+    }
+
     private void handleRankedPlayAutomaticDownload(object screen)
     {
         MultiplayerClient? client = getMemberValue<MultiplayerClient>(screen, "client");
@@ -614,6 +655,25 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
             return;
 
         queueLookupDownload(button, client.Room.CurrentPlaylistItem.BeatmapID, false);
+    }
+
+    private bool ensureMultiplayerSpectateAutomaticDownloadBridge(MultiplayerSpectateButton button)
+    {
+        if (automaticDownloadBridges.ContainsKey(button))
+            return true;
+
+        MultiplayerClient? client = getMemberValue<MultiplayerClient>(button, "client");
+        Bindable<bool>? automaticallyDownload = getFieldValue<Bindable<bool>>(button, "automaticallyDownload");
+
+        if (client == null || automaticallyDownload == null)
+            return false;
+
+        automaticDownloadBridges[button] = new MultiplayerSpectateAutomaticDownloadBridge(
+            client,
+            automaticallyDownload,
+            () => Scheduler.AddOnce(() => handleMultiplayerSpectateAutomaticDownload(button)));
+
+        return true;
     }
 
     private void handleMissingBeatmapNotification(MissingBeatmapNotification notification)
@@ -683,16 +743,16 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
         if (beatmapLookupCache == null || beatmapManager == null || BeatmapAccelDownloadRuntime.Downloader == null)
             return;
 
-        if (automaticDownloadAttempts.TryGetValue(owner, out int previousAttempt) && previousAttempt == beatmapId)
+        if (automaticLookupAttempts.TryGetValue(owner, out int previousAttempt) && previousAttempt == beatmapId)
             return;
 
         if (beatmapManager.IsAvailableLocally(new APIBeatmap { OnlineID = beatmapId }))
         {
-            automaticDownloadAttempts[owner] = beatmapId;
+            automaticLookupAttempts[owner] = beatmapId;
             return;
         }
 
-        automaticDownloadAttempts[owner] = beatmapId;
+        automaticLookupAttempts[owner] = beatmapId;
 
         beatmapLookupCache.GetBeatmapAsync(beatmapId, CancellationToken.None).ContinueWith(task => Schedule(() =>
         {
@@ -710,23 +770,32 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
         if (beatmapManager == null || BeatmapAccelDownloadRuntime.Downloader == null)
             return;
 
-        if (automaticDownloadAttempts.TryGetValue(owner, out int previousAttempt) && previousAttempt == beatmapSetId)
+        if (automaticSetDownloadAttempts.TryGetValue(owner, out int previousAttempt) && previousAttempt == beatmapSetId)
             return;
 
         if (beatmapManager.IsAvailableLocally(new BeatmapSetInfo { OnlineID = beatmapSetId }))
         {
-            automaticDownloadAttempts[owner] = beatmapSetId;
+            automaticSetDownloadAttempts[owner] = beatmapSetId;
             return;
         }
 
         if (BeatmapAccelDownloadRuntime.Downloader.GetExistingDownload(new BeatmapSetInfo { OnlineID = beatmapSetId }) != null)
         {
-            automaticDownloadAttempts[owner] = beatmapSetId;
+            automaticSetDownloadAttempts[owner] = beatmapSetId;
             return;
         }
 
         if (BeatmapAccelDownloadRuntime.Downloader.Download(beatmapSet, preferNoVideo))
-            automaticDownloadAttempts[owner] = beatmapSetId;
+            automaticSetDownloadAttempts[owner] = beatmapSetId;
+    }
+
+    private void removeAutomaticDownloadState(object owner)
+    {
+        if (automaticDownloadBridges.Remove(owner, out IDisposable? bridge))
+            bridge.Dispose();
+
+        automaticLookupAttempts.Remove(owner);
+        automaticSetDownloadAttempts.Remove(owner);
     }
 
     private void restorePatchedState()
@@ -745,7 +814,13 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
             bridge.Dispose();
 
         trackerBridges.Clear();
-        automaticDownloadAttempts.Clear();
+
+        foreach (IDisposable bridge in automaticDownloadBridges.Values)
+            bridge.Dispose();
+
+        automaticDownloadBridges.Clear();
+        automaticLookupAttempts.Clear();
+        automaticSetDownloadAttempts.Clear();
     }
 
     private void restoreActionPatch(object? key)
@@ -930,6 +1005,83 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
                 return;
 
             eventInfo.GetRemoveMethod(true)!.Invoke(composite, new object?[] { handler });
+        }
+    }
+
+    private sealed class SoloSpectatorAutomaticDownloadBridge : IDisposable
+    {
+        private readonly Bindable<bool> automaticDownload;
+        private readonly CompositeObserver beatmapPanelObserver;
+        private readonly Action trigger;
+
+        public SoloSpectatorAutomaticDownloadBridge(CompositeDrawable beatmapPanelContainer, Bindable<bool> automaticDownload, Action trigger)
+        {
+            this.automaticDownload = automaticDownload;
+            this.trigger = trigger;
+
+            beatmapPanelObserver = new CompositeObserver(beatmapPanelContainer, _ => trigger(), _ => { });
+            automaticDownload.ValueChanged += onAutomaticDownloadChanged;
+
+            trigger();
+        }
+
+        private void onAutomaticDownloadChanged(ValueChangedEvent<bool> _) => trigger();
+
+        public void Dispose()
+        {
+            automaticDownload.ValueChanged -= onAutomaticDownloadChanged;
+            beatmapPanelObserver.Dispose();
+        }
+    }
+
+    private sealed class MatchmakingAutomaticDownloadBridge : IDisposable
+    {
+        private readonly MultiplayerClient client;
+        private readonly Action trigger;
+
+        public MatchmakingAutomaticDownloadBridge(MultiplayerClient client, Action trigger)
+        {
+            this.client = client;
+            this.trigger = trigger;
+
+            client.SettingsChanged += onSettingsChanged;
+            trigger();
+        }
+
+        private void onSettingsChanged(MultiplayerRoomSettings _) => trigger();
+
+        public void Dispose()
+        {
+            client.SettingsChanged -= onSettingsChanged;
+        }
+    }
+
+    private sealed class MultiplayerSpectateAutomaticDownloadBridge : IDisposable
+    {
+        private readonly MultiplayerClient client;
+        private readonly Bindable<bool> automaticallyDownload;
+        private readonly Action trigger;
+
+        public MultiplayerSpectateAutomaticDownloadBridge(MultiplayerClient client, Bindable<bool> automaticallyDownload, Action trigger)
+        {
+            this.client = client;
+            this.automaticallyDownload = automaticallyDownload;
+            this.trigger = trigger;
+
+            client.RoomUpdated += onRoomUpdated;
+            automaticallyDownload.ValueChanged += onAutomaticallyDownloadChanged;
+
+            trigger();
+        }
+
+        private void onRoomUpdated() => trigger();
+
+        private void onAutomaticallyDownloadChanged(ValueChangedEvent<bool> _) => trigger();
+
+        public void Dispose()
+        {
+            client.RoomUpdated -= onRoomUpdated;
+            automaticallyDownload.ValueChanged -= onAutomaticallyDownloadChanged;
         }
     }
 
