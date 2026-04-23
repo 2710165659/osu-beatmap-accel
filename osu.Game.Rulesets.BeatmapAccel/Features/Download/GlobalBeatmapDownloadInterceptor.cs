@@ -41,7 +41,7 @@ namespace osu.Game.Rulesets.BeatmapAccel.Features.Download;
 
 public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 {
-    private const string ranked_play_screen_type_name = "osu.Game.Screens.OnlinePlay.Matchmaking.RankedPlay.RankedPlayScreen";
+    private const string ranked_play_availability_tracker_type_name = "osu.Game.Screens.OnlinePlay.Matchmaking.RankedPlay.RankedPlayBeatmapAvailabilityTracker";
 
     private static readonly BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
     private static readonly PropertyInfo? internalChildrenProperty = typeof(CompositeDrawable).GetProperty("InternalChildren", flags);
@@ -310,10 +310,11 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
                 break;
         }
 
-        if (isTypeOrSubclass(drawable, ranked_play_screen_type_name))
+        if (isTypeOrSubclass(drawable, ranked_play_availability_tracker_type_name))
         {
             disableDownloaderMember(drawable, "beatmapDownloader");
-            handleRankedPlayAutomaticDownload(drawable);
+            if (!ensureRankedPlayAutomaticDownloadBridge(drawable))
+                handleRankedPlayAutomaticDownload(drawable);
         }
     }
 
@@ -372,7 +373,7 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
                 break;
         }
 
-        if (isTypeOrSubclass(drawable, ranked_play_screen_type_name))
+        if (isTypeOrSubclass(drawable, ranked_play_availability_tracker_type_name))
         {
             restoreMemberPatch(drawable);
             removeAutomaticDownloadState(drawable);
@@ -634,14 +635,31 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
         return true;
     }
 
-    private void handleRankedPlayAutomaticDownload(object screen)
+    private void handleRankedPlayAutomaticDownload(object tracker)
     {
-        MultiplayerClient? client = getMemberValue<MultiplayerClient>(screen, "client");
+        MultiplayerClient? client = getMemberValue<MultiplayerClient>(tracker, "client");
 
         if (client?.Room?.CurrentPlaylistItem == null)
             return;
 
-        queueLookupDownload(screen, client.Room.CurrentPlaylistItem.BeatmapID, osuConfig?.Get<bool>(OsuSetting.PreferNoVideo) == true);
+        queueLookupDownload(tracker, client.Room.CurrentPlaylistItem.BeatmapID, osuConfig?.Get<bool>(OsuSetting.PreferNoVideo) == true);
+    }
+
+    private bool ensureRankedPlayAutomaticDownloadBridge(object tracker)
+    {
+        if (automaticDownloadBridges.ContainsKey(tracker))
+            return true;
+
+        MultiplayerClient? client = getMemberValue<MultiplayerClient>(tracker, "client");
+
+        if (client == null)
+            return false;
+
+        automaticDownloadBridges[tracker] = new MatchmakingAutomaticDownloadBridge(
+            client,
+            () => Scheduler.AddOnce(() => handleRankedPlayAutomaticDownload(tracker)));
+
+        return true;
     }
 
     private void handleMultiplayerSpectateAutomaticDownload(MultiplayerSpectateButton button)
