@@ -10,6 +10,7 @@ using osu.Game.Beatmaps;
 using osu.Game.Database;
 using osu.Game.Extensions;
 using osu.Game.Online.API;
+using osu.Game.Online.API.Requests.Responses;
 using osu.Game.Overlays.Notifications;
 using osu.Game.Rulesets.BeatmapAccel.Compatibility;
 
@@ -158,7 +159,7 @@ public partial class BeatmapAccelBeatmapModelDownloader
         if (beatmapManager == null || onlineId <= 0)
             return;
 
-        var beatmapSet = new BeatmapSetInfo { OnlineID = onlineId };
+        var beatmapSet = new APIBeatmap { OnlineID = onlineId };
 
         for (int i = 0; i < 40; i++)
         {

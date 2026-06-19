@@ -1,0 +1,17 @@
+# Changelog
+
+All notable changes to BeatmapAccel will be documented in this file.
+
+## [v1.0.1]
+
+### Fixed
+- 适配 osu! `2026.618.0-tachyon`：修复 `BeatmapManager.IsAvailableLocally(BeatmapSetInfo)` 改为抛异常后导致的下载完成确认报错。改用 `IBeatmapInfo` 重载。
+
+## [Previous]
+
+### Changed
+- 性能优化：轮询改事件驱动
+- 构建发布流程优化
+- 好友观战自动下载接管
+- 修复 lazer 423 更新后 rank play 自动下载失效问题
+- 兼容层增加、安卓兼容性改进

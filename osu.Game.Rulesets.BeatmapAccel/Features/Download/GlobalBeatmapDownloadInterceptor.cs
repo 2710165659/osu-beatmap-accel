@@ -791,7 +791,7 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
         if (automaticSetDownloadAttempts.TryGetValue(owner, out int previousAttempt) && previousAttempt == beatmapSetId)
             return;
 
-        if (beatmapManager.IsAvailableLocally(new BeatmapSetInfo { OnlineID = beatmapSetId }))
+        if (beatmapManager.IsAvailableLocally(new APIBeatmap { OnlineID = beatmapSetId }))
         {
             automaticSetDownloadAttempts[owner] = beatmapSetId;
             return;

@@ -1,17 +1,15 @@
-name: Build And Release
+name: Release
 
 on:
   push:
-    branches:
-      - main
-      - master
-  workflow_dispatch:
+    tags:
+      - "v*"
 
 permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  build:
     runs-on: windows-latest
 
     steps:
@@ -33,7 +31,7 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: Restore and build
+      - name: Build
         shell: pwsh
         run: >
           dotnet build
@@ -41,72 +39,25 @@ jobs:
           -c Release
           --nologo
 
-      - name: Package DLL
-        id: package
-        shell: pwsh
-        run: |
-          $dllPath = "$env:GITHUB_WORKSPACE\osu-beatmap-accel\osu.Game.Rulesets.BeatmapAccel\bin\Release\net8.0\osu.Game.Rulesets.BeatmapAccel.dll"
-          if (!(Test-Path $dllPath)) {
-            throw "DLL not found: $dllPath"
-          }
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: osu.Game.Rulesets.BeatmapAccel
+          path: osu-beatmap-accel\osu.Game.Rulesets.BeatmapAccel\bin\Release\net8.0\osu.Game.Rulesets.BeatmapAccel.dll
 
-          $packageRoot = "$env:RUNNER_TEMP\beatmapaccel-package"
-          $zipPath = "$env:RUNNER_TEMP\osu.Game.Rulesets.BeatmapAccel.zip"
+  release:
+    needs: build
+    runs-on: ubuntu-latest
 
-          if (Test-Path $packageRoot) {
-            Remove-Item $packageRoot -Recurse -Force
-          }
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: osu.Game.Rulesets.BeatmapAccel
+          path: artifact
 
-          if (Test-Path $zipPath) {
-            Remove-Item $zipPath -Force
-          }
-
-          New-Item -ItemType Directory -Path $packageRoot | Out-Null
-          Copy-Item $dllPath -Destination "$packageRoot\osu.Game.Rulesets.BeatmapAccel.dll"
-          Compress-Archive -Path "$packageRoot\osu.Game.Rulesets.BeatmapAccel.dll" -DestinationPath $zipPath -CompressionLevel Optimal
-
-          "zip_path=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-
-      - name: Prepare release metadata
-        id: release_meta
-        shell: pwsh
-        run: |
-          $buildTimeUtc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss 'UTC'")
-          "build_time_utc=$buildTimeUtc" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-
-      - name: Recreate rolling release
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release view auto-build *> $null
-          $releaseExists = $LASTEXITCODE -eq 0
-          $global:LASTEXITCODE = 0
-
-          if ($releaseExists) {
-            gh release delete auto-build --cleanup-tag --yes
-
-            if ($LASTEXITCODE -ne 0) {
-              throw "Failed to delete existing auto-build release."
-            }
-
-            $global:LASTEXITCODE = 0
-          }
-
-      - name: Publish rolling release
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: auto-build
-          name: Auto Build (${{ steps.release_meta.outputs.build_time_utc }})
-          prerelease: false
-          make_latest: true
-          generate_release_notes: false
-          overwrite_files: true
-          body: |
-            Build time: `${{ steps.release_meta.outputs.build_time_utc }}`
-
-            Automated build from `${{ github.sha }}`.
-
-            Source branch: `${{ github.ref_name }}`
-          files: |
-            ${{ steps.package.outputs.zip_path }}
+          generate_release_notes: true
+          files: artifact/osu.Game.Rulesets.BeatmapAccel.dll
