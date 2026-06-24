@@ -2,6 +2,10 @@
 
 All notable changes to BeatmapAccel will be documented in this file.
 
+## [V1.0.2]
+
+- 修复了多人房间内下载歌曲无限卡死在导入环节的问题[#1](https://github.com/2710165659/osu-beatmap-accel/issues/1)。
+
 ## [v1.0.1]
 
 ### Fixed

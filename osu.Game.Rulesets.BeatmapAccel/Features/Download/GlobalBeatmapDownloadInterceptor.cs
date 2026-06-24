@@ -744,7 +744,14 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
             return;
 
         request.Cancel();
-        Scheduler.AddDelayed(() => reattachTrackedDownload(request.Model.OnlineID), 50);
+
+        // Reattach any bridged trackers to the BeatmapAccel download on the next scheduler frame.
+        // No fixed delay needed: TrackerBridge.onDownloadBegan (subscribed in its constructor) already
+        // schedules the primary attachment synchronously when BeatmapAccel's DownloadBegan fires inside
+        // Download() above. This Add acts as an immediate safety net to cover the unlikely case where
+        // the event-based path misses the tracker — ensuring the tracker always gets re-bound to the
+        // BeatmapAccel request before the next draw frame.
+        Scheduler.Add(() => reattachTrackedDownload(request.Model.OnlineID));
     }
 
     private void reattachTrackedDownload(int onlineId)
@@ -1201,7 +1208,14 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
             var beatmapSetInfo = new BeatmapSetInfo { OnlineID = tracker.TrackedItem.OnlineID };
             ArchiveDownloadRequest<IBeatmapSetInfo>? request = downloader.GetExistingDownload(beatmapSetInfo);
 
-            if (request != null)
+            // Skip attaching if the download has already completed (Progress == 1).
+            // When Progress >= 1, BeatmapDownloadTracker.attachDownload() sets state to Importing
+            // but does NOT subscribe to Success/Failure events (see osu.Game BeatmapDownloadTracker).
+            // If we attach here, the tracker may get permanently stuck at Importing because:
+            //   - No events are subscribed (Progress >= 1 branch skips subscription)
+            //   - The realm subscription may have already fired earlier
+            // The tracker's own realm subscription will correctly detect import completion.
+            if (request != null && request.Progress < 1)
                 schedule(() => attachDownloadMethod?.Invoke(tracker, new object?[] { request }));
         }
 
