@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
+using osu.Framework.Logging;
 using osu.Game.Beatmaps;
 using osu.Game.Database;
 using osu.Game.Extensions;
@@ -75,6 +76,9 @@ public partial class BeatmapAccelBeatmapModelDownloader
 
         request.Success += filename =>
         {
+            // 下载传输成功说明当前优选 IP 可用，重置失败恢复的连续跳过计数。
+            CloudflareSpeedTestManager.OnDownloadSucceeded();
+
             _ = Task.Run(async () =>
             {
                 bool importSuccessful = false;
@@ -114,11 +118,18 @@ public partial class BeatmapAccelBeatmapModelDownloader
             DownloadFailed?.Invoke(request);
             notification.State = ProgressNotificationState.Cancelled;
 
-            if (error is not OperationCanceledException)
+            if (error is OperationCanceledException)
+                return;
+
+            BeatmapAccelLogging.LogError(error, $"Beatmap download failed for set {request.Model.OnlineID}");
+
+            if (isNonRecoverableDownloadFailure(error))
             {
-                BeatmapAccelLogging.LogError(error, $"Beatmap download failed for set {request.Model.OnlineID}");
-                CloudflareSpeedTestManager.BeginFailureRecoverySpeedTest(PostNotification);
+                BeatmapAccelLogging.Log($"Skipping preferred-IP recovery for non-recoverable beatmap download failure on set {request.Model.OnlineID}: {error.Message}");
+                return;
             }
+
+            CloudflareSpeedTestManager.BeginFailureRecoverySpeedTest(PostNotification);
         };
 
         notification.CancelRequested += () =>
@@ -175,6 +186,16 @@ public partial class BeatmapAccelBeatmapModelDownloader
             BeatmapAccelLogging.Log($"Imported beatmap set {onlineId} did not become locally visible before the wait timeout expired.");
     }
 
+    private static bool isNonRecoverableDownloadFailure(Exception error)
+    {
+        if (error is not PreferredIpDownloadHttpException httpError)
+            return false;
+
+        return httpError.StatusCode is HttpStatusCode.Unauthorized
+                                   or HttpStatusCode.NotFound
+                                   or HttpStatusCode.TooManyRequests;
+    }
+
     public void CancelAllDownloads()
     {
         PreferredIpDownloadBeatmapSetRequest[] activeDownloads;
@@ -215,6 +236,9 @@ public partial class BeatmapAccelBeatmapModelDownloader
         private readonly Stopwatch stopwatch = new();
 
         private int firstProgressLogged;
+        // [临时诊断] 跟踪最后一次进度回调的已写入字节数与 Content-Length，用于诊断移动端"传到一半被终止"。
+        private long lastProgressBytes;
+        private long? lastProgressTotal;
 
         public CancellationToken CancellationToken => cancellationSource.Token;
 
@@ -270,6 +294,10 @@ public partial class BeatmapAccelBeatmapModelDownloader
                         if (Interlocked.Exchange(ref firstProgressLogged, 1) == 0)
                             BeatmapAccelLogging.Log($"Preferred-IP download received first progress for beatmap set {Model.OnlineID} after {stopwatch.ElapsedMilliseconds} ms.");
 
+                        // [临时诊断] 记录最后进度，用于失败时判断"传到一半"的确切字节位置。
+                        lastProgressBytes = currentBytes;
+                        lastProgressTotal = totalBytes;
+
                         if (totalBytes.HasValue && totalBytes.Value > 0)
                             SetProgress((float)currentBytes / totalBytes.Value);
                     }), requestTimeout.Token).ConfigureAwait(false);
@@ -280,6 +308,20 @@ public partial class BeatmapAccelBeatmapModelDownloader
             }
             catch (Exception e)
             {
+                // [临时诊断] 仅对"非取消"的传输中断输出诊断（用户取消/总超时取消属预期行为，不刷屏）。
+                // 取消可能是 download_timeout(60s) 总超时或用户取消；非取消异常才是真正的传输中断。
+                bool tokenCancelled = cancellationSource.IsCancellationRequested;
+
+                if (!tokenCancelled && e is not OperationCanceledException)
+                {
+                    string typeChain = BeatmapAccelLogging.BuildExceptionTypeChain(e);
+
+                    BeatmapAccelLogging.Log($"[DIAG] Download aborted for set {Model.OnlineID} after {stopwatch.ElapsedMilliseconds} ms. " +
+                                            $"Type={typeChain}, Message={e.Message}, " +
+                                            $"lastBytes={lastProgressBytes}, lastTotal={(lastProgressTotal?.ToString() ?? "<null>")}, " +
+                                            $"preferredIp={(string.IsNullOrWhiteSpace(preferredIp) ? "<empty>" : preferredIp)}.", LogLevel.Important);
+                }
+
                 cleanupTargetFile();
                 Fail(e);
             }

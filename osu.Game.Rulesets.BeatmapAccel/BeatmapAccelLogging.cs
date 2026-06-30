@@ -27,4 +27,17 @@ public static class BeatmapAccelLogging
             currentMessage = null;
         }
     }
+
+    /// <summary>
+    /// 构造 "OuterType -> InnerType -> ..." 形式的异常类型链，用于诊断传输中断的确切来源。
+    /// </summary>
+    public static string BuildExceptionTypeChain(Exception exception)
+    {
+        string chain = exception.GetType().FullName ?? exception.GetType().Name;
+
+        for (Exception? inner = exception.InnerException; inner != null; inner = inner.InnerException)
+            chain += " -> " + (inner.GetType().FullName ?? inner.GetType().Name);
+
+        return chain;
+    }
 }

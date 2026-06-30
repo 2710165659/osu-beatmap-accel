@@ -24,3 +24,14 @@ internal sealed record PreferredIpFileDownloadRequest(
     IReadOnlyList<BeatmapAccelHttpHeader> Headers,
     Action<long, long?>? Progress = null,
     int MaxRedirects = 5);
+
+internal sealed class PreferredIpDownloadHttpException : Exception
+{
+    public HttpStatusCode StatusCode { get; }
+
+    public PreferredIpDownloadHttpException(HttpStatusCode statusCode, string? reasonPhrase, string? body)
+        : base($"HTTP {(int)statusCode} {reasonPhrase} {body}".Trim())
+    {
+        StatusCode = statusCode;
+    }
+}

@@ -64,7 +64,7 @@ internal sealed class WindowsBeatmapAccelPlatformRuntime : BeatmapAccelPlatformR
         if (!response.IsSuccessStatusCode)
         {
             string body = await ReadHttpStringAsync(response.Content, cancellationToken).ConfigureAwait(false);
-            throw new InvalidOperationException($"HTTP {(int)response.StatusCode} {response.ReasonPhrase} {body}");
+            throw new PreferredIpDownloadHttpException(response.StatusCode, response.ReasonPhrase, body);
         }
 
         await CopyHttpContentToFileAsync(response.Content, request.DestinationPath, cancellationToken, request.Progress).ConfigureAwait(false);

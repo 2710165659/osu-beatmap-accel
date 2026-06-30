@@ -157,6 +157,7 @@ public static class CloudflareSpeedTestManager
     };
 
     private static readonly SemaphoreSlim switchLock = new(1, 1);
+    private static readonly object failureRecoveryLock = new();
     private static readonly IBeatmapAccelPlatformRuntime runtime = BeatmapAccelCompatibility.Current;
     private static readonly TimeSpan default_tcp_probe_timeout = TimeSpan.FromMilliseconds(1200);
     private static readonly TimeSpan mobile_tcp_probe_timeout = TimeSpan.FromMilliseconds(3000);
@@ -168,9 +169,12 @@ public static class CloudflareSpeedTestManager
 
     private static int startupSwitchTriggered;
     private static int failureRecoveryTriggered;
+    private static int failureRecoveryKeepCurrentSkipCount;
 
     private const int failure_detail_limit = 3;
     private const int mobile_retry_candidate_limit = 8;
+    // 同一优选 IP 连续 N 次"探测存活却仍下载失败"后，强制走完整切换，避免 keep-current 探测造成死锁。
+    private const int failure_recovery_force_switch_after = 3;
 
     public static Action<Action>? ScheduleToMainThread { get; set; }
     public static Action<Notification>? NotificationPoster { get; set; }
@@ -193,13 +197,20 @@ public static class CloudflareSpeedTestManager
 
         _ = Task.Run(async () =>
         {
-            BeatmapAccelLogging.Log($"Startup speed test running on {runtime.Name} runtime strategy.");
-            SpeedTestSelectionResult result = await SwitchToFastestIpAsync(SpeedTestTrigger.Startup).ConfigureAwait(false);
+            try
+            {
+                BeatmapAccelLogging.Log($"Startup speed test running on {runtime.Name} runtime strategy.");
+                SpeedTestSelectionResult result = await SwitchToFastestIpAsync(SpeedTestTrigger.Startup).ConfigureAwait(false);
 
-            if (!result.Success)
-                BeatmapAccelLogging.Log($"Startup preferred-IP speed test failed: {result.Message}");
-            else
-                BeatmapAccelLogging.Log($"Startup preferred-IP speed test selected {result.SelectedIp}. {result.Message}");
+                if (!result.Success)
+                    BeatmapAccelLogging.Log($"Startup preferred-IP speed test failed: {result.Message}");
+                else
+                    BeatmapAccelLogging.Log($"Startup preferred-IP speed test selected {result.SelectedIp}. {result.Message}");
+            }
+            catch (Exception e)
+            {
+                BeatmapAccelLogging.LogError(e, "Startup speed test threw an unexpected exception.");
+            }
         });
     }
 
@@ -208,11 +219,25 @@ public static class CloudflareSpeedTestManager
         if (Interlocked.Exchange(ref failureRecoveryTriggered, 1) != 0)
             return;
 
-        var config = BeatmapAccelRulesetConfigManager.Instance;
+        string preferredIp;
 
-        if (config == null || !config.GetAutoSwitchOnDownloadFailure())
+        try
         {
+            var config = BeatmapAccelRulesetConfigManager.Instance;
+
+            if (config == null || !config.GetAutoSwitchOnDownloadFailure())
+            {
+                Interlocked.Exchange(ref failureRecoveryTriggered, 0);
+                return;
+            }
+
+            preferredIp = config.GetPreferredIp();
+        }
+        catch (Exception e)
+        {
+            // 前言阶段抛异常必须复位单飞标志，否则 failureRecoveryTriggered 永久卡在 1，后续恢复全部失效。
             Interlocked.Exchange(ref failureRecoveryTriggered, 0);
+            BeatmapAccelLogging.LogError(e, "Failed to begin download failure recovery.");
             return;
         }
 
@@ -220,6 +245,51 @@ public static class CloudflareSpeedTestManager
         {
             try
             {
+                int skipCount;
+                bool shouldForceSwitch;
+
+                lock (failureRecoveryLock)
+                {
+                    skipCount = failureRecoveryKeepCurrentSkipCount;
+                    shouldForceSwitch = skipCount + 1 >= failure_recovery_force_switch_after;
+                }
+
+                // 小探测通过不代表大文件持续传输也能成功（移动端常见"传一半被掐"）。
+                // 仅在尚未触及强制切换阈值时探测当前 IP：探测存活则跳过切换并累计跳过次数；
+                // 达到阈值后不再做无谓探测，直接走完整切换，避免死循环。
+                bool probeSucceeded;
+
+                if (!shouldForceSwitch)
+                {
+                    using var probeTimeout = new CancellationTokenSource();
+                    probeTimeout.CancelAfter(getTcpProbeTimeout() + getHttpProbeTimeout() + TimeSpan.FromSeconds(1));
+                    probeSucceeded = await tryKeepCurrentPreferredIpAsync(preferredIp, probeTimeout.Token).ConfigureAwait(false);
+                }
+                else
+                {
+                    BeatmapAccelLogging.Log($"Current preferred IP {preferredIp} survived {skipCount} consecutive recovery probes while downloads keep failing; forcing a full switch.");
+                    probeSucceeded = false;
+                }
+
+                if (probeSucceeded)
+                {
+                    int newSkipCount;
+                    lock (failureRecoveryLock)
+                        newSkipCount = ++failureRecoveryKeepCurrentSkipCount;
+
+                    string message = $"当前优选 IP {preferredIp} 探测可用，已跳过切换（第 {newSkipCount} 次，连续 {failure_recovery_force_switch_after} 次后将强制切换）。";
+                    BeatmapAccelLogging.Log($"Download failure recovery skipped. {message}");
+                    postNotificationOrFallback(new SimpleNotification
+                    {
+                        Text = $"BeatmapAccel: {message}"
+                    }, postNotification);
+                    return;
+                }
+
+                // 探测失败（"探测存活"连续被打断）或已达阈值强制切换：重置跳过计数，让切换后从新 IP 重新起算。
+                lock (failureRecoveryLock)
+                    failureRecoveryKeepCurrentSkipCount = 0;
+
                 BeatmapAccelLogging.Log($"Failure recovery speed test running on {runtime.Name} runtime strategy.");
                 SpeedTestSelectionResult result = await SwitchToFastestIpAsync(SpeedTestTrigger.DownloadFailure).ConfigureAwait(false);
 
@@ -240,11 +310,28 @@ public static class CloudflareSpeedTestManager
                     }, postNotification);
                 }
             }
+            catch (Exception e)
+            {
+                // finally 会复位单飞标志；此处吞掉异常避免 fire-and-forget 的未观察任务异常。
+                BeatmapAccelLogging.LogError(e, "Download failure recovery speed test threw an unexpected exception.");
+            }
             finally
             {
                 Interlocked.Exchange(ref failureRecoveryTriggered, 0);
             }
         });
+    }
+
+    /// <summary>
+    /// 一次下载成功说明当前优选 IP 可用，重置"探测存活却下载失败"的连续计数。
+    /// </summary>
+    public static void OnDownloadSucceeded()
+    {
+        lock (failureRecoveryLock)
+        {
+            if (failureRecoveryKeepCurrentSkipCount != 0)
+                failureRecoveryKeepCurrentSkipCount = 0;
+        }
     }
 
     public static async Task<SpeedTestSelectionResult> SwitchToFastestIpAsync(SpeedTestTrigger trigger, INotificationOverlay? notifications = null, CancellationToken cancellationToken = default)
@@ -295,6 +382,7 @@ public static class CloudflareSpeedTestManager
                                      .First();
 
             await runOnMainThreadAsync(() => config.SetPreferredIp(winner.Ip)).ConfigureAwait(false);
+            resetFailureRecoverySkipCount();
 
             return await finishAsync(config, notifications, trigger, new SpeedTestSelectionResult(true, winner.Ip, buildSuccessSummary(trigger, candidates.Count, tcpResults.Count, httpResults.Count, stopwatch.Elapsed, winner))).ConfigureAwait(false);
         }
@@ -332,6 +420,38 @@ public static class CloudflareSpeedTestManager
         }
 
         return result;
+    }
+
+    private static void resetFailureRecoverySkipCount()
+    {
+        lock (failureRecoveryLock)
+            failureRecoveryKeepCurrentSkipCount = 0;
+    }
+
+    private static async Task<bool> tryKeepCurrentPreferredIpAsync(string preferredIp, CancellationToken cancellationToken)
+    {
+        if (!IPAddress.TryParse(preferredIp, out _))
+            return false;
+
+        var candidate = new ProbeCandidate("current", preferredIp, true);
+        TcpProbeResult tcpResult = await probeTcpAsync(candidate, getTcpProbeTimeout(), cancellationToken).ConfigureAwait(false);
+
+        if (!tcpResult.Success)
+        {
+            BeatmapAccelLogging.Log($"Current preferred IP {preferredIp} TCP probe failed before failure recovery: {tcpResult.FailureReason}");
+            return false;
+        }
+
+        HttpProbeResult? httpResult = await probeHttpAsync(tcpResult, cancellationToken).ConfigureAwait(false);
+
+        if (httpResult == null)
+        {
+            BeatmapAccelLogging.Log($"Current preferred IP {preferredIp} HTTP probe failed before failure recovery.");
+            return false;
+        }
+
+        BeatmapAccelLogging.Log($"Current preferred IP {preferredIp} probe succeeded before failure recovery: TCP {tcpResult.Latency.TotalMilliseconds:F0} ms, HTTP {httpResult.HttpLatency.TotalMilliseconds:F0} ms, status {(int)httpResult.StatusCode}.");
+        return true;
     }
 
     private static Task runOnMainThreadAsync(Action action)

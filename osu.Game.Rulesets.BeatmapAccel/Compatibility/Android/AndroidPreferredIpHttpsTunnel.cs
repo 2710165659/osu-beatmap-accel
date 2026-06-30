@@ -12,6 +12,8 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using osu.Framework.Logging;
+using osu.Game.Rulesets.BeatmapAccel;
 
 namespace osu.Game.Rulesets.BeatmapAccel.Compatibility.Android;
 
@@ -70,7 +72,7 @@ internal static class AndroidPreferredIpHttpsTunnel
             if ((int)response.StatusCode < 200 || (int)response.StatusCode >= 300)
             {
                 string body = response.ReadBodyAsString(error_body_limit_bytes);
-                throw new InvalidOperationException($"HTTP {(int)response.StatusCode} {response.ReasonPhrase} {body}");
+                throw new PreferredIpDownloadHttpException(response.StatusCode, response.ReasonPhrase, body);
             }
 
             response.CopyBodyToFile(request.DestinationPath, request.Progress);
@@ -348,15 +350,28 @@ internal static class AndroidPreferredIpHttpsTunnel
             using FileStream output = new(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, body_buffer_size, useAsync: false);
             long written = 0;
             long? totalBytes = tryGetContentLength();
+            bool chunked = isChunked();
 
-            if (isChunked())
-                copyChunkedBody(output, ref written, totalBytes, progress);
-            else if (totalBytes.HasValue)
-                copyFixedLengthBody(output, totalBytes.Value, ref written, progress);
-            else
-                copyUntilEnd(output, ref written, progress);
+            try
+            {
+                if (chunked)
+                    copyChunkedBody(output, ref written, totalBytes, progress);
+                else if (totalBytes.HasValue)
+                    copyFixedLengthBody(output, totalBytes.Value, ref written, progress);
+                else
+                    copyUntilEnd(output, ref written, progress);
 
-            output.Flush();
+                output.Flush();
+            }
+            catch (Exception e)
+            {
+                // [临时诊断] 传输中断最内层：记录已写入字节数、Content-Length、是否 chunked、异常类型链。
+                // 这是判断"传到一半被直接终止"的精确来源（EndOfStreamException=流提前EOF / IOException=socket超时或断连 / SocketException=RST 等）。
+                string typeChain = BeatmapAccelLogging.BuildExceptionTypeChain(e);
+
+                BeatmapAccelLogging.Log($"[DIAG-Android] Body transfer aborted: written={written}, contentLength={(totalBytes?.ToString() ?? "<null>")}, chunked={chunked}, type={typeChain}, message={e.Message}", LogLevel.Important);
+                throw;
+            }
         }
 
         public void Dispose()
