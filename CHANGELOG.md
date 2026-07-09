@@ -5,6 +5,7 @@ All notable changes to BeatmapAccel will be documented in this file.
 ## [v1.0.3]
 
 - 修复了tachyon709更新引起的报错
+- 优化下载出错自动测速切换逻辑
 
 ## [V1.0.2]
 
