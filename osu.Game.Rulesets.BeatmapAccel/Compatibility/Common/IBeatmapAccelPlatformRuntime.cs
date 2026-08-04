@@ -15,6 +15,12 @@ internal interface IBeatmapAccelPlatformRuntime
 
     bool PreferConservativeNetworking { get; }
 
+    /// <summary>
+    /// Whether the OS currently has a system proxy configured (e.g. a VPN client in proxy mode).
+    /// When true, downloads should go through the proxy instead of connecting directly to the preferred IP.
+    /// </summary>
+    bool HasSystemProxy { get; }
+
     long NextInt64(long minInclusive, long maxExclusive);
 
     void NextBytes(byte[] buffer);

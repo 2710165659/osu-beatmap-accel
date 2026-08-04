@@ -28,6 +28,7 @@ using osu.Game.Overlays;
 using osu.Game.Overlays.BeatmapSet.Buttons;
 using osu.Game.Overlays.Notifications;
 using osu.Game.Overlays.Settings;
+using osu.Game.Rulesets.BeatmapAccel.Compatibility;
 using osu.Game.Rulesets.BeatmapAccel.Configuration;
 using osu.Game.Rulesets.BeatmapAccel.Features.Injection;
 using osu.Game.Screens.OnlinePlay.DailyChallenge;
@@ -127,6 +128,15 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
             endInterception();
     }
 
+    /// <summary>
+    /// Whether interception should actually run right now.
+    /// The user's saved setting is respected, but a system proxy disables interception entirely
+    /// (downloads must go through the proxy instead of the preferred-IP direct path), without
+    /// touching the saved setting value.
+    /// </summary>
+    private bool shouldIntercept
+        => interceptAllDownloads?.Value == true && !BeatmapAccelCompatibility.Current.HasSystemProxy;
+
     private void hookOriginalDownloaderNotifications()
     {
         if (originalDownloader == null)
@@ -152,7 +162,7 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 
     private void filterOriginalDownloaderNotification(Notification notification)
     {
-        if (interceptAllDownloads?.Value == true)
+        if (shouldIntercept)
             return;
 
         originalDownloaderNotificationTarget?.Invoke(notification);
@@ -162,6 +172,14 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
     {
         if (interceptionActive || BeatmapAccelDownloadRuntime.Downloader == null || Parent is not Drawable root)
             return;
+
+        // 系统代理（如 VPN 代理模式）下接管下载会绕过代理直连优选 IP 而失败，
+        // 因此不启动拦截，让下载继续走原版链路（即系统代理）。用户保存的开关状态保持不变。
+        if (!shouldIntercept)
+        {
+            BeatmapAccelLogging.Log("System proxy detected; global download interception is disabled so downloads keep using the system proxy.");
+            return;
+        }
 
         interceptionActive = true;
         attachSubtree(root);
@@ -732,7 +750,7 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 
     private void onOriginalDownloadBegan(ArchiveDownloadRequest<IBeatmapSetInfo> request)
     {
-        if (interceptAllDownloads?.Value != true || BeatmapAccelDownloadRuntime.Downloader == null)
+        if (!shouldIntercept || BeatmapAccelDownloadRuntime.Downloader == null)
             return;
 
         bool noVideo = noVideoField?.GetValue(request) as bool? == true;

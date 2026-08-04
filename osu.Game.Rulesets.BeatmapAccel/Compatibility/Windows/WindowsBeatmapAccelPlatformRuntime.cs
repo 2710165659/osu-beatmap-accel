@@ -13,7 +13,23 @@ internal sealed class WindowsBeatmapAccelPlatformRuntime : BeatmapAccelPlatformR
 {
     private static readonly System.Reflection.PropertyInfo? connectCallbackProperty = typeof(SocketsHttpHandler).GetProperty("ConnectCallback");
 
+    private static readonly Lazy<bool> hasSystemProxyLazy = new Lazy<bool>(() =>
+    {
+        try
+        {
+            // HttpClient.DefaultProxy resolves the system proxy (WinINET) exactly like osu-framework's WebRequest stack.
+            // When no proxy is configured it returns a proxy instance whose GetProxy() yields null for every URI.
+            return HttpClient.DefaultProxy?.GetProxy(new Uri("https://osu.ppy.sh/")) != null;
+        }
+        catch
+        {
+            return false;
+        }
+    });
+
     public override string Name => "windows";
+
+    public override bool HasSystemProxy => hasSystemProxyLazy.Value;
 
     public override long NextInt64(long minInclusive, long maxExclusive)
         => Random.Shared.NextInt64(minInclusive, maxExclusive);
@@ -80,7 +96,10 @@ internal sealed class WindowsBeatmapAccelPlatformRuntime : BeatmapAccelPlatformR
             PooledConnectionLifetime: TimeSpan.Zero,
             PooledConnectionIdleTimeout: TimeSpan.Zero));
 
-        if (preferredIp == null || connectCallbackProperty == null)
+        // With a system proxy active, connecting straight to the preferred IP would bypass the proxy and fail.
+        // Leave the default connection path in place so requests go through the proxy (SocketsHttpHandler uses
+        // HttpClient.DefaultProxy by default, matching the rest of osu!lazer).
+        if (preferredIp == null || connectCallbackProperty == null || HasSystemProxy)
             return handler;
 
         var callback = new Func<SocketsHttpConnectionContext, CancellationToken, ValueTask<Stream>>((context, cancellationToken) => connectPreferredIpAsync(preferredIp, context, cancellationToken));

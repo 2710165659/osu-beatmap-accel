@@ -5,6 +5,7 @@ All notable changes to BeatmapAccel will be documented in this file.
 ## [v1.0.4]
 
 - 修复好友观战自动下载不可用的问题
+- 检测到开代理后自动不接管谱面下载
 
 ## [v1.0.3]
 

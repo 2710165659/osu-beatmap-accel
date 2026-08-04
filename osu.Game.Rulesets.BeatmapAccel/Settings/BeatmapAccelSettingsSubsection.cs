@@ -9,6 +9,7 @@ using osu.Game.Graphics.UserInterfaceV2;
 using osu.Game.Overlays;
 using osu.Game.Overlays.Notifications;
 using osu.Game.Overlays.Settings;
+using osu.Game.Rulesets.BeatmapAccel.Compatibility;
 using osu.Game.Rulesets.BeatmapAccel.Configuration;
 using osu.Game.Rulesets.BeatmapAccel.Features.Download;
 
@@ -17,6 +18,7 @@ namespace osu.Game.Rulesets.BeatmapAccel.Settings;
 public partial class BeatmapAccelSettingsSubsection : RulesetSettingsSubsection
 {
     private SettingsButtonV2 switchButton = null!;
+    private SettingsNote proxyNote = null!;
 
     [Resolved(canBeNull: true)]
     private INotificationOverlay? notifications { get; set; }
@@ -84,6 +86,10 @@ public partial class BeatmapAccelSettingsSubsection : RulesetSettingsSubsection
                 HintText = "高风险兼容模式。BeatmapAccel 会尝试接管当前界面的谱面下载按钮、自动缺谱面下载与下载状态追踪，让它们尽量走优选 IP。osu! 更新后可能失效，或导致少数页面下载状态显示异常。",
                 Current = config.GetBindable<bool>(BeatmapAccelSetting.InterceptAllBeatmapDownloads)
             }),
+            wrapWithSettingsPadding(proxyNote = new SettingsNote
+            {
+                RelativeSizeAxes = Axes.X,
+            }),
             wrapWithSettingsPadding(new FormCheckBox
             {
                 Caption = "启动自动测速切换",
@@ -103,6 +109,15 @@ public partial class BeatmapAccelSettingsSubsection : RulesetSettingsSubsection
                 Current = config.GetBindable<bool>(BeatmapAccelSetting.EnableIpv6Candidates)
             })
         };
+
+        // 检测到系统代理（如 VPN 代理模式）时，接管下载会绕过代理直连优选 IP 而失败，
+        // 因此提示用户；不改动用户已保存的开关状态，关闭代理并重启后会自动恢复接管能力。
+        if (BeatmapAccelCompatibility.Current.HasSystemProxy)
+        {
+            proxyNote.Current.Value = new SettingsNote.Data(
+                "检测到代理，接管所有谱面下载将不会生效。关闭代理并重启 osu! 后自动恢复。",
+                SettingsNote.Type.Informational);
+        }
     }
 
     private static Drawable wrapWithSettingsPadding(Drawable drawable) => new Container

@@ -21,6 +21,8 @@ internal abstract class BeatmapAccelPlatformRuntimeBase : IBeatmapAccelPlatformR
 
     public virtual bool PreferConservativeNetworking => false;
 
+    public virtual bool HasSystemProxy => false;
+
     public abstract long NextInt64(long minInclusive, long maxExclusive);
 
     public abstract void NextBytes(byte[] buffer);
