@@ -2,6 +2,10 @@
 
 All notable changes to BeatmapAccel will be documented in this file.
 
+## [v1.0.4]
+
+- 修复好友观战自动下载不可用的问题
+
 ## [v1.0.3]
 
 - 修复了tachyon709更新引起的报错

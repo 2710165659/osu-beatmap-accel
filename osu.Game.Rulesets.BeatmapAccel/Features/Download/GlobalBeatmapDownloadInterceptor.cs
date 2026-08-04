@@ -567,11 +567,12 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
     private void handleSoloSpectatorAutomaticDownload(SoloSpectatorScreen screen)
     {
         var automaticDownload = getFieldValue<SettingsCheckbox>(screen, "automaticDownload");
-        APIBeatmapSet? beatmapSet = getFieldValue<APIBeatmapSet>(screen, "beatmapSet");
+        APIBeatmap? beatmap = getFieldValue<APIBeatmap>(screen, "beatmap");
 
-        if (automaticDownload is not IHasCurrentValue<bool> toggle || beatmapSet == null || !toggle.Current.Value)
+        if (automaticDownload is not IHasCurrentValue<bool> toggle || beatmap?.BeatmapSet == null || !toggle.Current.Value)
             return;
 
+        APIBeatmapSet beatmapSet = beatmap.BeatmapSet;
         requestAutomaticDownload(screen, beatmapSet.OnlineID, beatmapSet, false);
     }
 
