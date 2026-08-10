@@ -2,6 +2,11 @@
 
 All notable changes to BeatmapAccel will be documented in this file.
 
+## [v1.0.5]
+
+- 修复单人旁观时将谱面集 ID 当作难度谱面 ID，导致本地已有谱面仍重复下载的问题[#3](https://github.com/2710165659/osu-beatmap-accel/issues/3)。
+- 修复同一 ID 混用导致谱面导入完成后本地可用性确认无效的问题。
+
 ## [v1.0.4]
 
 - 修复好友观战自动下载不可用的问题

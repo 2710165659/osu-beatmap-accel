@@ -62,6 +62,7 @@ public partial class BeatmapAccelBeatmapModelDownloader
         if (GetExistingDownload(model) != null)
             return false;
 
+        int[] onlineBeatmapIds = model.Beatmaps.Select(beatmap => beatmap.OnlineID).Where(id => id > 0).Distinct().ToArray();
         var request = new PreferredIpDownloadBeatmapSetRequest(model, minimiseDownloadSize, api, CloudflareSpeedTestManager.GetPreferredIp());
         var notification = new DownloadNotification
         {
@@ -88,7 +89,7 @@ public partial class BeatmapAccelBeatmapModelDownloader
                     if (originalModel != null)
                     {
                         importSuccessful = await beatmapImporter.ImportAsUpdate(notification, new ImportTask(filename), originalModel).ConfigureAwait(false) != null;
-                        await waitForLocalAvailability(request.Model.OnlineID, request.CancellationToken).ConfigureAwait(false);
+                        await waitForLocalAvailability(request.Model.OnlineID, onlineBeatmapIds, request.CancellationToken).ConfigureAwait(false);
                     }
                     else
                     {
@@ -98,7 +99,7 @@ public partial class BeatmapAccelBeatmapModelDownloader
                         if (importSuccessful)
                         {
                             repairImportedSetOnlineIds(imported, request.Model.OnlineID);
-                            await waitForLocalAvailability(request.Model.OnlineID, request.CancellationToken).ConfigureAwait(false);
+                            await waitForLocalAvailability(request.Model.OnlineID, onlineBeatmapIds, request.CancellationToken).ConfigureAwait(false);
                         }
                     }
                 }
@@ -165,25 +166,26 @@ public partial class BeatmapAccelBeatmapModelDownloader
         }
     }
 
-    private async Task waitForLocalAvailability(int onlineId, CancellationToken cancellationToken)
+    private async Task waitForLocalAvailability(int beatmapSetId, IReadOnlyList<int> onlineBeatmapIds, CancellationToken cancellationToken)
     {
-        if (beatmapManager == null || onlineId <= 0)
+        if (beatmapManager == null || onlineBeatmapIds.Count == 0)
             return;
 
-        var beatmapSet = new APIBeatmap { OnlineID = onlineId };
+        bool isAvailableLocally()
+            => onlineBeatmapIds.Any(id => beatmapManager.IsAvailableLocally(new APIBeatmap { OnlineID = id }));
 
         for (int i = 0; i < 40; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (beatmapManager.IsAvailableLocally(beatmapSet))
+            if (isAvailableLocally())
                 return;
 
             await Task.Delay(250, cancellationToken).ConfigureAwait(false);
         }
 
-        if (!beatmapManager.IsAvailableLocally(beatmapSet))
-            BeatmapAccelLogging.Log($"Imported beatmap set {onlineId} did not become locally visible before the wait timeout expired.");
+        if (!isAvailableLocally())
+            BeatmapAccelLogging.Log($"Imported beatmap set {beatmapSetId} did not become locally visible before the wait timeout expired.");
     }
 
     private static bool isNonRecoverableDownloadFailure(Exception error)

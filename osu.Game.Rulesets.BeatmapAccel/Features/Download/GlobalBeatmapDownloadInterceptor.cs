@@ -590,8 +590,7 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
         if (automaticDownload is not IHasCurrentValue<bool> toggle || beatmap?.BeatmapSet == null || !toggle.Current.Value)
             return;
 
-        APIBeatmapSet beatmapSet = beatmap.BeatmapSet;
-        requestAutomaticDownload(screen, beatmapSet.OnlineID, beatmapSet, false);
+        requestAutomaticDownload(screen, beatmap.BeatmapSet, beatmap, false);
     }
 
     private bool ensureSoloSpectatorAutomaticDownloadBridge(SoloSpectatorScreen screen)
@@ -624,7 +623,7 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
         if (beatmapSet == null)
             return;
 
-        requestAutomaticDownload(intro, beatmapSet.OnlineID, beatmapSet, osuConfig.Get<bool>(OsuSetting.PreferNoVideo));
+        requestAutomaticDownload(intro, beatmapSet, item!.Beatmap, osuConfig.Get<bool>(OsuSetting.PreferNoVideo));
     }
 
     private void handleMatchmakingAutomaticDownload(ScreenMatchmaking screen)
@@ -722,7 +721,8 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
         if (autoDownload != true || beatmapSet == null)
             return;
 
-        requestAutomaticDownload(notification, beatmapSet.OnlineID, beatmapSet, preferNoVideo);
+        // MissingBeatmapNotification has already established that the required beatmap hash is unavailable.
+        requestAutomaticDownload(notification, beatmapSet, null, preferNoVideo);
     }
 
     private void attachPanelUpdateProgress(PanelUpdateBeatmapButton panelUpdateBeatmapButton, BeatmapSetInfo beatmapSet)
@@ -800,24 +800,27 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 
         beatmapLookupCache.GetBeatmapAsync(beatmapId, CancellationToken.None).ContinueWith(task => Schedule(() =>
         {
-            APIBeatmapSet? beatmapSet = task.GetResultSafely()?.BeatmapSet;
+            APIBeatmap? beatmap = task.GetResultSafely();
+            APIBeatmapSet? beatmapSet = beatmap?.BeatmapSet;
 
             if (beatmapSet == null)
                 return;
 
-            requestAutomaticDownload(owner, beatmapSet.OnlineID, beatmapSet, preferNoVideo);
+            requestAutomaticDownload(owner, beatmapSet, beatmap, preferNoVideo);
         }));
     }
 
-    private void requestAutomaticDownload(object owner, int beatmapSetId, IBeatmapSetInfo beatmapSet, bool preferNoVideo)
+    private void requestAutomaticDownload(object owner, IBeatmapSetInfo beatmapSet, IBeatmapInfo? availabilityBeatmap, bool preferNoVideo)
     {
         if (beatmapManager == null || BeatmapAccelDownloadRuntime.Downloader == null)
             return;
 
+        int beatmapSetId = beatmapSet.OnlineID;
+
         if (automaticSetDownloadAttempts.TryGetValue(owner, out int previousAttempt) && previousAttempt == beatmapSetId)
             return;
 
-        if (beatmapManager.IsAvailableLocally(new APIBeatmap { OnlineID = beatmapSetId }))
+        if (availabilityBeatmap != null && beatmapManager.IsAvailableLocally(availabilityBeatmap))
         {
             automaticSetDownloadAttempts[owner] = beatmapSetId;
             return;
