@@ -4,7 +4,6 @@ using System.Threading.Tasks;
 using osu.Framework.Allocation;
 using osu.Framework.Graphics;
 using osu.Framework.Graphics.Containers;
-using osu.Framework.Localisation;
 using osu.Game.Graphics.UserInterfaceV2;
 using osu.Game.Overlays;
 using osu.Game.Overlays.Notifications;
@@ -22,8 +21,6 @@ public partial class BeatmapAccelSettingsSubsection : RulesetSettingsSubsection
 
     [Resolved(canBeNull: true)]
     private INotificationOverlay? notifications { get; set; }
-
-    protected override LocalisableString Header => "BeatmapAccel";
 
     public BeatmapAccelSettingsSubsection(BeatmapAccelRuleset ruleset)
         : base(ruleset)

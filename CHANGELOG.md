@@ -2,6 +2,10 @@
 
 All notable changes to BeatmapAccel will be documented in this file.
 
+## [v1.0.6]
+
+- 适配 osu! `2026.819.0-tachyon`，修复设置页面 API 变更导致规则集无法加载的问题。
+
 ## [v1.0.5]
 
 - 修复单人旁观时将谱面集 ID 当作难度谱面 ID，导致本地已有谱面仍重复下载的问题[#3](https://github.com/2710165659/osu-beatmap-accel/issues/3)。
