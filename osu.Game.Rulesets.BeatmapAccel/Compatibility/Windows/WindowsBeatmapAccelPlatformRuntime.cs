@@ -6,6 +6,7 @@ using System.Net.Http;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
+using osu.Game.Rulesets.BeatmapAccel.Configuration;
 
 namespace osu.Game.Rulesets.BeatmapAccel.Compatibility.Windows;
 
@@ -54,7 +55,7 @@ internal sealed class WindowsBeatmapAccelPlatformRuntime : BeatmapAccelPlatformR
             using HttpResponseMessage response = await client.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
             stopwatch.Stop();
 
-            if ((int)response.StatusCode >= 500)
+            if (response.StatusCode == HttpStatusCode.Forbidden || (int)response.StatusCode >= 500)
                 return null;
 
             return new PreferredIpHttpProbeResponse(response.StatusCode, stopwatch.Elapsed);
@@ -96,10 +97,11 @@ internal sealed class WindowsBeatmapAccelPlatformRuntime : BeatmapAccelPlatformR
             PooledConnectionLifetime: TimeSpan.Zero,
             PooledConnectionIdleTimeout: TimeSpan.Zero));
 
-        // With a system proxy active, connecting straight to the preferred IP would bypass the proxy and fail.
-        // Leave the default connection path in place so requests go through the proxy (SocketsHttpHandler uses
-        // HttpClient.DefaultProxy by default, matching the rest of osu!lazer).
-        if (preferredIp == null || connectCallbackProperty == null || HasSystemProxy)
+        bool ignoreProxy = BeatmapAccelRulesetConfigManager.Instance?.GetIgnoreProxy() == true;
+        handler.UseProxy = !ignoreProxy;
+
+        // Keep the system proxy's connection path unless the user explicitly opts into direct connections.
+        if (preferredIp == null || connectCallbackProperty == null || (HasSystemProxy && !ignoreProxy))
             return handler;
 
         var callback = new Func<SocketsHttpConnectionContext, CancellationToken, ValueTask<Stream>>((context, cancellationToken) => connectPreferredIpAsync(preferredIp, context, cancellationToken));

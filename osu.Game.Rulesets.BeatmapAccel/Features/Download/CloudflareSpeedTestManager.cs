@@ -632,7 +632,7 @@ public static class CloudflareSpeedTestManager
                 "BeatmapAccel-SpeedTest",
                 getTcpProbeTimeout()), timeout.Token).ConfigureAwait(false);
 
-            if (response == null || (int)response.Value.StatusCode >= 500)
+            if (response == null || response.Value.StatusCode == HttpStatusCode.Forbidden || (int)response.Value.StatusCode >= 500)
                 return null;
 
             return new HttpProbeResult(candidate.Candidate, candidate.Latency, response.Value.Latency, response.Value.StatusCode, null);

@@ -29,7 +29,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: 10.0.x
 
       - name: Build
         shell: pwsh
@@ -43,7 +43,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: osu.Game.Rulesets.BeatmapAccel
-          path: osu-beatmap-accel\osu.Game.Rulesets.BeatmapAccel\bin\Release\net8.0\osu.Game.Rulesets.BeatmapAccel.dll
+          path: osu-beatmap-accel\osu.Game.Rulesets.BeatmapAccel\bin\Release\net10.0\osu.Game.Rulesets.BeatmapAccel.dll
 
   release:
     needs: build

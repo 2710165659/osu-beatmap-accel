@@ -18,6 +18,7 @@ public class BeatmapAccelRulesetConfigManager : RulesetConfigManager<BeatmapAcce
         base.InitialiseDefaults();
         SetDefault(BeatmapAccelSetting.ShowPreviewDownloadOverlay, true);
         SetDefault(BeatmapAccelSetting.InterceptAllBeatmapDownloads, false);
+        SetDefault(BeatmapAccelSetting.IgnoreProxy, false);
         SetDefault(BeatmapAccelSetting.AutoSwitchOnStartup, true);
         SetDefault(BeatmapAccelSetting.AutoSwitchOnDownloadFailure, true);
         SetDefault(BeatmapAccelSetting.EnableIpv6Candidates, false);
@@ -30,6 +31,9 @@ public class BeatmapAccelRulesetConfigManager : RulesetConfigManager<BeatmapAcce
 
     public bool GetInterceptAllBeatmapDownloads()
         => Get<bool>(BeatmapAccelSetting.InterceptAllBeatmapDownloads);
+
+    public bool GetIgnoreProxy()
+        => Get<bool>(BeatmapAccelSetting.IgnoreProxy);
 
     public bool GetAutoSwitchOnStartup()
         => Get<bool>(BeatmapAccelSetting.AutoSwitchOnStartup);
@@ -62,4 +66,5 @@ public enum BeatmapAccelSetting
     EnableIpv6Candidates,
     PreferredIp,
     LastSpeedTestSummary,
+    IgnoreProxy,
 }

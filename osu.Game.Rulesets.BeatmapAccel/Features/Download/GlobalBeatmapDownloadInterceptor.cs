@@ -72,6 +72,7 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
     private BeatmapModelDownloader? originalDownloader { get; set; }
 
     private IBindable<bool>? interceptAllDownloads;
+    private IBindable<bool>? ignoreProxy;
     private bool interceptionActive;
     private MemberInfo? originalDownloaderNotificationMember;
     private Action<Notification>? originalDownloaderNotificationTarget;
@@ -110,6 +111,8 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 
         interceptAllDownloads = BeatmapAccelRulesetConfigManager.Instance.GetBindable<bool>(BeatmapAccelSetting.InterceptAllBeatmapDownloads);
         interceptAllDownloads.BindValueChanged(onInterceptionChanged);
+        ignoreProxy = BeatmapAccelRulesetConfigManager.Instance.GetBindable<bool>(BeatmapAccelSetting.IgnoreProxy);
+        ignoreProxy.BindValueChanged(onInterceptionChanged);
     }
 
     protected override void LoadComplete()
@@ -122,7 +125,7 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 
     private void onInterceptionChanged(ValueChangedEvent<bool> change)
     {
-        if (change.NewValue)
+        if (shouldIntercept)
             beginInterception();
         else
             endInterception();
@@ -130,12 +133,12 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
 
     /// <summary>
     /// Whether interception should actually run right now.
-    /// The user's saved setting is respected, but a system proxy disables interception entirely
-    /// (downloads must go through the proxy instead of the preferred-IP direct path), without
-    /// touching the saved setting value.
+    /// A system proxy disables interception unless the user explicitly chooses to ignore it.
+    /// The saved interception setting is preserved in either case.
     /// </summary>
     private bool shouldIntercept
-        => interceptAllDownloads?.Value == true && !BeatmapAccelCompatibility.Current.HasSystemProxy;
+        => interceptAllDownloads?.Value == true
+           && (ignoreProxy?.Value == true || !BeatmapAccelCompatibility.Current.HasSystemProxy);
 
     private void hookOriginalDownloaderNotifications()
     {
@@ -173,8 +176,7 @@ public partial class GlobalBeatmapDownloadInterceptor : AbstractHandler
         if (interceptionActive || BeatmapAccelDownloadRuntime.Downloader == null || Parent is not Drawable root)
             return;
 
-        // 系统代理（如 VPN 代理模式）下接管下载会绕过代理直连优选 IP 而失败，
-        // 因此不启动拦截，让下载继续走原版链路（即系统代理）。用户保存的开关状态保持不变。
+        // 默认在系统代理下保留原版下载链路；用户可通过忽略代理显式启用直连接管。
         if (!shouldIntercept)
         {
             BeatmapAccelLogging.Log("System proxy detected; global download interception is disabled so downloads keep using the system proxy.");

@@ -18,6 +18,7 @@ public partial class BeatmapAccelSettingsSubsection : RulesetSettingsSubsection
 {
     private SettingsButtonV2 switchButton = null!;
     private SettingsNote proxyNote = null!;
+    private readonly Bindable<bool> ignoreProxy = new();
 
     [Resolved(canBeNull: true)]
     private INotificationOverlay? notifications { get; set; }
@@ -31,6 +32,7 @@ public partial class BeatmapAccelSettingsSubsection : RulesetSettingsSubsection
     private void load()
     {
         var config = (BeatmapAccelRulesetConfigManager)Config;
+        ignoreProxy.BindTo(config.GetBindable<bool>(BeatmapAccelSetting.IgnoreProxy));
 
         CloudflareSpeedTestManager.ScheduleToMainThread = action => Schedule(action);
         CloudflareSpeedTestManager.NotificationPoster = notifications == null ? null : new Action<Notification>(notifications.Post);
@@ -83,6 +85,12 @@ public partial class BeatmapAccelSettingsSubsection : RulesetSettingsSubsection
                 HintText = "高风险兼容模式。BeatmapAccel 会尝试接管当前界面的谱面下载按钮、自动缺谱面下载与下载状态追踪，让它们尽量走优选 IP。osu! 更新后可能失效，或导致少数页面下载状态显示异常。",
                 Current = config.GetBindable<bool>(BeatmapAccelSetting.InterceptAllBeatmapDownloads)
             }),
+            wrapWithSettingsPadding(new FormCheckBox
+            {
+                Caption = "是否忽略代理",
+                HintText = "开启后，BeatmapAccel 将忽略系统代理并直接连接优选 IP；启用接管所有谱面下载后，有代理时也会生效。",
+                Current = ignoreProxy
+            }),
             wrapWithSettingsPadding(proxyNote = new SettingsNote
             {
                 RelativeSizeAxes = Axes.X,
@@ -107,14 +115,19 @@ public partial class BeatmapAccelSettingsSubsection : RulesetSettingsSubsection
             })
         };
 
-        // 检测到系统代理（如 VPN 代理模式）时，接管下载会绕过代理直连优选 IP 而失败，
-        // 因此提示用户；不改动用户已保存的开关状态，关闭代理并重启后会自动恢复接管能力。
-        if (BeatmapAccelCompatibility.Current.HasSystemProxy)
+        ignoreProxy.BindValueChanged(_ => updateProxyNote(), true);
+    }
+
+    private void updateProxyNote()
+    {
+        if (BeatmapAccelCompatibility.Current.HasSystemProxy && !ignoreProxy.Value)
         {
             proxyNote.Current.Value = new SettingsNote.Data(
-                "检测到代理，接管所有谱面下载将不会生效。关闭代理并重启 osu! 后自动恢复。",
+                "检测到代理，接管所有谱面下载默认不生效，可开启忽略代理生效",
                 SettingsNote.Type.Informational);
         }
+        else
+            proxyNote.Current.Value = null;
     }
 
     private static Drawable wrapWithSettingsPadding(Drawable drawable) => new Container

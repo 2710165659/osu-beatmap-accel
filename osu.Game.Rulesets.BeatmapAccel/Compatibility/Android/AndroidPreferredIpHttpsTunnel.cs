@@ -45,7 +45,7 @@ internal static class AndroidPreferredIpHttpsTunnel
         }, request.ConnectTimeout, cancellationToken);
 
         TimeSpan latency = DateTime.UtcNow - startedAt;
-        return (int)response.StatusCode >= 500
+        return response.StatusCode == HttpStatusCode.Forbidden || (int)response.StatusCode >= 500
             ? null
             : new PreferredIpHttpProbeResponse(response.StatusCode, latency);
     }
