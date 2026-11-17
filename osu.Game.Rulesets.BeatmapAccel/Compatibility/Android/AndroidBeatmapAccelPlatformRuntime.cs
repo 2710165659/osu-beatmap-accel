@@ -106,6 +106,13 @@ internal sealed class AndroidBeatmapAccelPlatformRuntime : BeatmapAccelPlatformR
     {
         byte[] bytes = new byte[sizeof(ulong)];
         NextBytes(bytes);
-        return BitConverter.ToUInt64(bytes, 0);
+        return (ulong)bytes[0]
+               | (ulong)bytes[1] << 8
+               | (ulong)bytes[2] << 16
+               | (ulong)bytes[3] << 24
+               | (ulong)bytes[4] << 32
+               | (ulong)bytes[5] << 40
+               | (ulong)bytes[6] << 48
+               | (ulong)bytes[7] << 56;
     }
 }

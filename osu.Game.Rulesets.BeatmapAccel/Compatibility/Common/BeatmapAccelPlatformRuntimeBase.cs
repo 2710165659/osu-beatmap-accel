@@ -112,19 +112,23 @@ internal abstract class BeatmapAccelPlatformRuntimeBase : IBeatmapAccelPlatformR
         for (int i = 0; i < groups.Length; i++)
             groups[i] = (ushort)((littleEndian[i * 2] << 8) | littleEndian[i * 2 + 1]);
 
-        return string.Create(39, groups, static (span, values) =>
+        const string hexDigits = "0123456789abcdef";
+        var formatted = new char[39];
+        int index = 0;
+
+        for (int i = 0; i < groups.Length; i++)
         {
-            int index = 0;
+            ushort group = groups[i];
+            formatted[index++] = hexDigits[(group >> 12) & 0xF];
+            formatted[index++] = hexDigits[(group >> 8) & 0xF];
+            formatted[index++] = hexDigits[(group >> 4) & 0xF];
+            formatted[index++] = hexDigits[group & 0xF];
 
-            for (int i = 0; i < values.Length; i++)
-            {
-                values[i].TryFormat(span.Slice(index, 4), out int charsWritten, "x4");
-                index += charsWritten;
+            if (i < groups.Length - 1)
+                formatted[index++] = ':';
+        }
 
-                if (i < values.Length - 1)
-                    span[index++] = ':';
-            }
-        });
+        return new string(formatted);
     }
 
     protected SocketsHttpHandler CreatePreferredIpHttpHandler(PreferredIpHttpHandlerOptions options)
