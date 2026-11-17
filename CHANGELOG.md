@@ -2,6 +2,10 @@
 
 All notable changes to BeatmapAccel will be documented in this file.
 
+## [v1.1.1]
+
+- 修复安卓运行报错问题
+
 ## [v1.1.0]
 
 - HTTP 测速返回 403 时不再判定为探测可用，下载失败后的恢复探测同步应用此规则。
